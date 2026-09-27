@@ -1,0 +1,63 @@
+# The feed server is the default service. The browser is opt-in behind the
+# `browser` profile, because nothing uses it unless a feed URL carries
+# `render_js=1`: the plain HTML path serves ordinary listings, and the browser
+# only matters for listings that render their items with JavaScript.
+#
+#   mkdir -p data
+#   docker compose up --build
+#   open http://localhost:8080
+#
+# To enable JavaScript rendering, start both services and point the server at
+# the browser. They share the stack's own network, so the browser is reached by
+# service name and never published to the host, which keeps an open browser off
+# the public internet:
+#
+#   FEEDME_RENDER_URL=http://chromium:3000 docker compose --profile browser up --build
+#
+# The database is a bind mount at ./data so it is easy to inspect. That is why
+# the container runs as the host user: the image's default uid cannot write a
+# directory owned by you. Set FEEDME_UID and FEEDME_GID to what `id -u` and
+# `id -g` print, or put `user:` in a docker-compose.override.yml instead.
+
+services:
+  feedme:
+    build: .
+    image: feedme:local
+    # Run as the host user so the bind-mounted ./data is writable. This
+    # overrides the image's unprivileged uid 65532.
+    user: "${FEEDME_UID:-1000}:${FEEDME_GID:-1000}"
+    ports:
+      - "8080:8080"
+    environment:
+      # Set to protect /feeds. Unset leaves the management page open, which is
+      # right behind a trusted network and wrong on the public internet.
+      FEEDME_ADMIN_TOKEN: "${FEEDME_ADMIN_TOKEN:-}"
+    volumes:
+      # The database lives on the host at ./data/feedme.db.
+      - ./data:/data
+      # Uncomment to edit site configs without rebuilding the image.
+      # - ./configs:/configs:ro
+    command:
+      - serve
+      - -addr
+      - :8080
+      - -db
+      - /data/feedme.db
+      - -site-dir
+      - /configs/sites
+      # Empty unless the browser profile is in use; see the header.
+      - -render-url
+      - "${FEEDME_RENDER_URL:-}"
+    restart: unless-stopped
+
+  chromium:
+    # browserless exposes POST /content, which internal/render speaks. Opt-in:
+    # start it with `docker compose --profile browser up`.
+    image: browserless/chrome:latest
+    profiles: ["browser"]
+    environment:
+      CONNECTION_TIMEOUT: "60000"
+      MAX_CONCURRENT_SESSIONS: "2"
+    # Chromium needs more shared memory than the 64MB default.
+    shm_size: 1gb
+    restart: unless-stopped

@@ -1,0 +1,9 @@
+# GitHub shows a Sponsor button only for the platforms listed here, and only
+# once a handle is filled in. Every line is commented out, so the repository
+# advertises nothing until a rail actually exists.
+#
+# Uncomment a line and replace the handle to turn its button on.
+#
+# ko_fi: your-handle
+# buy_me_a_coffee: your-handle
+# custom: ["https://saweria.co/your-handle", "https://trakteer.id/your-handle"]

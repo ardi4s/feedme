@@ -1,0 +1,27 @@
+# Build output.
+/bin/
+
+# Runtime state. The SQLite database and its write-ahead log hold the caches
+# and the build history of one instance, not anything the source needs. Docker
+# Compose bind-mounts ./data from the host, so without this every local run
+# would show up as a change.
+/data/
+*.db
+*.db-shm
+*.db-wal
+
+# Local-only settings: .env may hold FEEDME_ADMIN_TOKEN, and a compose override
+# holds whatever is true of this machine rather than of the project (a shared
+# network, a fixed uid, a token). Neither is ever committed.
+.env
+docker-compose.override.yml
+
+# Editor and OS noise.
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Python bytecode left behind by the scripts in tools/.
+__pycache__/
+*.pyc

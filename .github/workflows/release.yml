@@ -1,0 +1,106 @@
+name: Release
+
+# Pushing a tag like v0.1.0 publishes the binaries and the container image for
+# that version. Nothing runs on a branch push.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  binaries:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # One static tarball per architecture. CGO is off, so each is a single
+      # binary and the tarball carries the site configs and the licence with it.
+      - name: Build tarballs
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            name="feedme_${version}_linux_${arch}"
+            mkdir -p "dist/${name}"
+            CGO_ENABLED=0 GOOS=linux GOARCH="${arch}" go build -trimpath \
+              -ldflags "-s -w -X main.version=${version}" \
+              -o "dist/${name}/feedme" ./cmd/feedme
+            cp -R configs "dist/${name}/configs"
+            cp README.md LICENSE "dist/${name}/"
+            tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+            rm -rf "dist/${name}"
+          done
+          (cd dist && sha256sum ./*.tar.gz > checksums.txt)
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/checksums.txt
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # GHCR rejects an uppercase path, so the repository name is lowercased.
+      # The image gets four tags: the released version (0.1.0), the release line
+      # (0.1), the git tag (v0.1.0), and latest, which follows the newest
+      # release.
+      - name: Resolve the image name and version
+        id: image
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          {
+            echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+            echo "version=${version}"
+            echo "minor=$(echo "${version}" | cut -d. -f1,2)"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          # The binary reports the released version rather than the Dockerfile's
+          # `docker` default, and without the tag's leading `v`, which is how the
+          # tarballs report it too.
+          build-args: |
+            VERSION=${{ steps.image.outputs.version }}
+          # The `source` label is what links the package on GHCR back to this
+          # repository, so it is set explicitly.
+          labels: |
+            org.opencontainers.image.title=feedme
+            org.opencontainers.image.description=RSS feed creator. Turn any web page into an RSS 2.0, Atom 1.0 or JSON Feed 1.1 feed.
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.version=${{ steps.image.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          tags: |
+            ${{ steps.image.outputs.name }}:${{ steps.image.outputs.version }}
+            ${{ steps.image.outputs.name }}:${{ steps.image.outputs.minor }}
+            ${{ steps.image.outputs.name }}:${{ github.ref_name }}
+            ${{ steps.image.outputs.name }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
