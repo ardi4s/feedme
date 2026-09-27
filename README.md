@@ -28,6 +28,12 @@ make all            # vet, test, and build ./bin/feedme
 ./bin/feedme serve  # listen on :8080
 ```
 
+Go 1.25 or newer. Each [release](https://github.com/ardi4s/feedme/releases)
+carries this build as a tarball for linux/amd64 and linux/arm64 — the binary,
+the site configs and the licence, with `checksums.txt` beside it. The
+[container image](https://github.com/ardi4s/feedme/pkgs/container/feedme) is the
+other way in, and [Docker](#docker) covers that.
+
 `feedme serve` flags:
 
 | Flag | Default | Meaning |

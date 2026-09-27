@@ -1,4 +1,4 @@
-# feedme — self-hosted full-text feed generator
+# feedme — RSS feed creator
 export GOTOOLCHAIN ?= go1.25.11
 
 BIN     := bin/feedme
