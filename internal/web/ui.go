@@ -143,6 +143,26 @@ tr.group td { background: #fafafa; padding: .45rem .7rem; }
 .actions .btn:last-child { margin-right: 0; }
 .err { color: var(--destructive); font-size: var(--text-xs); margin-top: .15rem; word-break: break-word; }
 .empty { padding: 2.5rem 1rem; text-align: center; color: var(--muted-foreground); font-size: var(--text-md); }
+
+.note { color: var(--muted-foreground); font-size: var(--text-xs); line-height: 1.5; margin: .8rem 0 0; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: var(--muted); padding: .08rem .3rem; border-radius: 4px; font-size: .9em; }
+
+/* The sign-in page is the only page here that is not a list, so it is the only
+   one with a card and a text field. Both live in this file rather than inline,
+   for the same reason as everything else: a second page should not invent a
+   second palette. */
+.login { max-width: 24rem; margin: 3rem auto 0; }
+.login .card { border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--card); padding: 1.3rem; }
+.login h1 { margin-bottom: .35rem; }
+.login .lede { margin-bottom: 1rem; }
+.login label { display: block; font-size: var(--text-sm); font-weight: 500; margin-bottom: .3rem; }
+.login input { font: inherit; font-size: var(--text-md); width: 100%; padding: .45rem .55rem;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--card); color: var(--foreground); }
+.login input:focus-visible { outline: none; border-color: var(--foreground); box-shadow: 0 0 0 3px var(--ring); }
+.login .btn { width: 100%; justify-content: center; margin-top: .9rem; }
+.login .err { margin: 0 0 .8rem; }
 `
 
 // The nav a page shows beside the wordmark. Every page builds its header

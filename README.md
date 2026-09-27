@@ -110,7 +110,8 @@ FEEDME_ADMIN_TOKEN=$(openssl rand -hex 24) docker compose up -d
 | `/check` | Render an HTML page describing what a feed URL would produce, without fetching the source (so it cannot leak the server's IP to an arbitrary site). |
 | `/preview` | Build the feed and render its items as HTML, so you can see what you are about to subscribe to. |
 | `/healthz` | Liveness check. |
-| `/feeds` | Management page: every feed that has been built, grouped by the page it was built from. |
+| `/feeds` | Management page: every feed that has been built, grouped by the page it was built from. Behind the token when one is set. |
+| `/login` | Sign-in form for the management page. Trades the token for a session cookie, so a browser never has to meet a Basic prompt. |
 | `/feedme.png`, `/favicon.ico`, `/favicon.png` | The brand image and favicons. They are embedded in the binary, so the runtime image needs no static directory. |
 | `/` | A four-mode form — Automatic, Simple, Advanced, Merge — with a Preview button that builds the feed and shows its items. |
 
@@ -412,12 +413,18 @@ removes it.
 
 The management page is open by default, which suits a server on localhost or a
 trusted network. Set `FEEDME_ADMIN_TOKEN` — or pass `-admin-token` — and
-`/feeds` asks for it before it shows anything or accepts an action. The token is
-the password of an HTTP Basic prompt, so a browser remembers it after the first
-visit; a script can send `Authorization: Bearer <token>` instead. Feed URLs are
-never behind it, so readers are unaffected either way. The environment variable
-is the better of the two, because a command-line flag is visible in the process
-list to every user on the machine.
+`/feeds` asks for it before it shows anything or accepts an action.
+
+A browser is sent to a sign-in form at `/login`, which trades the token for a
+session cookie scoped to `/feeds`; closing the browser ends the session. It is a
+form rather than an HTTP Basic prompt because browsers have stopped showing that
+prompt reliably, and an operator who cannot get past a prompt cannot reach their
+own page. A script can keep presenting the token directly, as
+`Authorization: Bearer <token>` or as the password of a Basic pair.
+
+Feed URLs are never behind the token, so readers are unaffected either way. The
+environment variable is the better of the two places to set it, because a
+command-line flag is visible in the process list to every user on the machine.
 
 ## Security
 
@@ -444,8 +451,9 @@ list to every user on the machine.
 - Auto-detection is good but not magic. Reach for `feedme probe` and an explicit
   selector when it guesses wrong.
 - `FEEDME_ADMIN_TOKEN` is one password shared by everyone who manages the
-  server, not accounts. There is no login, no session, and no way to revoke one
-  holder without changing the token for all of them.
+  server, not accounts. Everyone signs in with the same token, there is no way to
+  revoke one holder without changing it for all of them, and the session cookie
+  lasts until the browser closes.
 
 ## Development
 

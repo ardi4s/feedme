@@ -9,7 +9,6 @@ package web
 
 import (
 	"context"
-	"crypto/subtle"
 	"errors"
 	"fmt"
 	"html"
@@ -44,9 +43,11 @@ type Options struct {
 	Recorder BuildRecorder
 	// Admin backs the /feeds management page. Nil hides the page.
 	Admin FeedAdmin
-	// ManageToken, when set, is the password the management page asks for.
-	// Empty leaves the page open, which is what a single-user instance on
-	// localhost wants.
+	// ManageToken, when set, is the password the management page asks for. A
+	// browser signs in with it once and is handed a session cookie; a script
+	// can send it as a bearer token or as the password of a Basic pair. Empty
+	// leaves the page open, which is what a single-user instance on localhost
+	// wants.
 	ManageToken string
 }
 
@@ -158,10 +159,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleCheck(w, r)
 	case "/preview":
 		s.handlePreview(w, r)
-	case "/feeds":
+	case feedsPath:
 		if s.authorizeManage(w, r) {
 			s.handleFeeds(w, r)
 		}
+	case loginPath:
+		s.handleLogin(w, r)
 	case "/healthz":
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
@@ -191,23 +194,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // authorizeManage guards the management page. With no token configured the page
 // is open; setting one closes it to callers that cannot present the token.
 //
-// The token is accepted as the password of an HTTP Basic pair, so a browser
-// asks for it once and then remembers it, and as a bearer token, so a script
-// can send it without inventing a username. The comparison is constant time,
-// because a token is a secret and a timing difference would leak it a byte at
-// a time.
+// A browser that cannot present it is sent to the sign-in form rather than
+// challenged, because the browser's own Basic prompt is what Chromium now
+// answers with an error page; login.go tells that story. Everything else gets
+// the challenge, which is the answer a script knows how to act on.
 func (s *Server) authorizeManage(w http.ResponseWriter, r *http.Request) bool {
 	if s.manageToken == "" {
 		return true
 	}
-	presented := ""
-	if _, pass, ok := r.BasicAuth(); ok {
-		presented = pass
-	} else if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
-		presented = strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
-	}
-	if subtle.ConstantTimeCompare([]byte(presented), []byte(s.manageToken)) == 1 {
+	if s.credentialOK(r) {
 		return true
+	}
+	if wantsHTML(r) {
+		http.Redirect(w, r, loginPath, http.StatusSeeOther)
+		return false
 	}
 	w.Header().Set("WWW-Authenticate", `Basic realm="feedme", charset="UTF-8"`)
 	http.Error(w, "authentication required", http.StatusUnauthorized)
@@ -484,6 +484,21 @@ func notModifiedSince(r *http.Request, lastModified time.Time) bool {
 	return !lastModified.After(t.UTC().Truncate(time.Second))
 }
 
+// requestScheme reports the scheme the caller used. A request that arrived
+// through a reverse proxy carries http on the wire, so the proxy's header wins
+// when it is there. The session cookie also reads this, to decide whether it may
+// be marked Secure.
+func requestScheme(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if v := r.Header.Get("X-Forwarded-Proto"); v != "" {
+		scheme = strings.ToLower(strings.TrimSpace(strings.Split(v, ",")[0]))
+	}
+	return scheme
+}
+
 // selfLink builds the canonical URL of a feed request.
 //
 // The scheme is taken from the request, or from X-Forwarded-Proto when a proxy
@@ -498,13 +513,7 @@ func selfLink(r *http.Request, spec feedurl.Spec) string {
 // preview about to be rendered is for the same feed the reader will ask for, so
 // its identity is the /extract URL regardless of which page asked.
 func selfLinkAt(r *http.Request, spec feedurl.Spec, path string) string {
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	if v := r.Header.Get("X-Forwarded-Proto"); v != "" {
-		scheme = strings.ToLower(strings.TrimSpace(strings.Split(v, ",")[0]))
-	}
+	scheme := requestScheme(r)
 	q := spec.Query().Encode()
 	host := r.Host
 	if host == "" {

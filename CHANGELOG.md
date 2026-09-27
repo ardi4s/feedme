@@ -2,6 +2,15 @@
 
 Newest first. Versions are `MAJOR.MINOR.PATCH`.
 
+## 0.2.0 — 2026-09-27
+
+- Sign in to the management page through a form at `/login` instead of an HTTP
+  Basic prompt, which browsers have stopped showing reliably: Chromium answers
+  the navigation with an error page, leaving the operator locked out. The form
+  exchanges the token for a session cookie scoped to `/feeds`. The token itself
+  is still accepted as a bearer token or as a Basic password, so scripts and
+  `curl` are unaffected.
+
 ## 0.1.0 — 2026-09-27
 
 First release.
