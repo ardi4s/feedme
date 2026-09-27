@@ -4,15 +4,29 @@
 # only matters for listings that render their items with JavaScript.
 #
 #   mkdir -p data
-#   docker compose up --build
+#   docker compose up -d
 #   open http://localhost:8080
+#
+# The image is pulled from GHCR, built for linux/amd64 and linux/arm64. The tag
+# below names one release, so nothing changes version until you edit it; `0.1`,
+# `v0.1.0` and `latest` are published as well. `docker compose pull` fetches the
+# tag the file names, and a tag change is the only thing that moves a deployment
+# to a new release.
+#
+# To build from source instead, give the service a build context in a
+# docker-compose.override.yml, which Compose merges automatically:
+#
+#   services:
+#     feedme:
+#       build: .
+#       image: feedme:local
 #
 # To enable JavaScript rendering, start both services and point the server at
 # the browser. They share the stack's own network, so the browser is reached by
 # service name and never published to the host, which keeps an open browser off
 # the public internet:
 #
-#   FEEDME_RENDER_URL=http://chromium:3000 docker compose --profile browser up --build
+#   FEEDME_RENDER_URL=http://chromium:3000 docker compose --profile browser up -d
 #
 # The database is a bind mount at ./data so it is easy to inspect. That is why
 # the container runs as the host user: the image's default uid cannot write a
@@ -21,8 +35,7 @@
 
 services:
   feedme:
-    build: .
-    image: feedme:local
+    image: ghcr.io/ardi4s/feedme:0.1.0
     # Run as the host user so the bind-mounted ./data is writable. This
     # overrides the image's unprivileged uid 65532.
     user: "${FEEDME_UID:-1000}:${FEEDME_GID:-1000}"

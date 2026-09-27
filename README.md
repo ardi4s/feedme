@@ -54,28 +54,32 @@ shortcut, and `feedme help` for the command list.
 
 ```sh
 mkdir -p data
-docker compose up --build
+docker compose up -d
 ```
 
-The image is a static, shell-less build. The database is a bind mount at
+`docker compose` pulls the image from GHCR — built for linux/amd64 and
+linux/arm64, with no build step — and the database is a bind mount at
 `./data/feedme.db`, so the container runs as your host user. `FEEDME_UID` and
 `FEEDME_GID` default to `1000:1000`; setting them from `id -u`/`id -g` is what
 lets the container write the mount:
 
 ```sh
-FEEDME_UID=$(id -u) FEEDME_GID=$(id -g) docker compose up --build
+FEEDME_UID=$(id -u) FEEDME_GID=$(id -g) docker compose up -d
 ```
 
-The stack is self-contained: its own network, and only the feed server
-published. Settings that are true of one machine rather than of the project go
-in `docker-compose.override.yml`, which Compose merges automatically and which
-this repository ignores:
+The compose file names one release (`ghcr.io/ardi4s/feedme:0.1.0`), so a
+`docker compose pull` cannot move a deployment to a new version on its own.
+`:0.1`, `:v0.1.0` and `:latest` are published too, for following a release line
+rather than one release. `docker-compose.override.yml` is where a choice that is
+true of one machine belongs, and the repository ignores it:
 
 ```yaml
 # docker-compose.override.yml — never committed.
 services:
   feedme:
-    user: "1001:1001"
+    build: .            # build from the checkout instead of pulling
+    image: feedme:local # a local name, so a build does not overwrite the pull
+    user: "1001:1001"   # this machine's uid, so ./data is writable
     networks: [shared]
 networks:
   shared:
@@ -89,7 +93,7 @@ Set `FEEDME_ADMIN_TOKEN` to put the management page behind a password. Compose
 passes the variable through when it is set:
 
 ```sh
-FEEDME_ADMIN_TOKEN=$(openssl rand -hex 24) docker compose up --build
+FEEDME_ADMIN_TOKEN=$(openssl rand -hex 24) docker compose up -d
 ```
 
 ## Endpoints
@@ -346,11 +350,11 @@ in HTML. In the compose file the browser sits behind the `browser` profile:
 
 ```sh
 # Server only (the default): no browser, no render_js.
-docker compose up --build
+docker compose up -d
 
 # Server plus browser. They share the stack's own network, so the server
 # reaches the browser by service name.
-FEEDME_RENDER_URL=http://chromium:3000 docker compose --profile browser up --build
+FEEDME_RENDER_URL=http://chromium:3000 docker compose --profile browser up -d
 ```
 
 Rendering is a fallback, not the default path: the plain fetch is tried first,
