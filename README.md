@@ -273,6 +273,81 @@ into the same pipeline as scraped ones:
 
 No `url` is required when `feeds` is given.
 
+## Google News, Google Alerts, and click-through links
+
+An aggregator publishes links of its own so that it can count the click. Those
+links are opaque, and a feed built from one would carry teasers instead of
+articles, so `fulltext=1` opens them first.
+
+Two kinds, handled differently on purpose:
+
+- **Links that name their destination in the query string** — a Google
+  click-through `google.com/url?…&url=…` (Google Alerts) or `…&q=…` (a plain
+  search result), and Bing News' `bing.com/news/apiclick.aspx?…&url=…` — are
+  read, not fetched. They cost no request, so the item is published with the
+  publisher's own link, and filters like `filter=example.com` and `domain=` see
+  the publisher rather than the aggregator. A wrapper that answers with a
+  redirect instead of naming its target costs one request, which is what a
+  redirect is, and lands in the same place.
+- **Google News links** cannot be read at all: since July 2024 the path is an
+  opaque token and the page it opens is a JavaScript shell that redirects in the
+  browser. The publisher URL is obtained from Google with two extra requests,
+  and it is used for **the article body only** — the entry keeps its Google News
+  link, which already works for a reader and stays stable.
+
+```
+/extract?url=https://news.google.com/rss/search?q=agentic+ai&hl=en-US&gl=US&ceid=US:en&fulltext=1
+```
+
+A feed address works in `url` as well as in `feeds[]`, and gives the same feed
+either way. That is the field a reader copies an address into, and one that is
+already a feed has nothing for the listing path to find. The document is read as
+what it is, so this costs no request that a listing page would not. A page that
+merely mentions a feed URL is still read as a page.
+
+Google News and Google Alerts both forbid automated clients from the very path
+that serves their feed (`news.google.com` disallows everything, `google.com`
+disallows `/alerts/`), so reading them needs `respect_robots: false` on the host.
+A config for each ships in `configs/sites/`, because the path is a published
+endpoint meant for readers rather than something crawled, and the alternative is
+every operator rediscovering the same 403:
+
+```yaml
+# configs/sites/news.google.com.yml
+respect_robots: false
+# and configs/sites/www.google.com.yml for an Alerts feed
+```
+
+Both are scoped to one host. `google.com` itself and any other Google host keep
+the check, and `-no-robots` is still what turns it off everywhere — which is why
+these two hosts are a config rather than a flag. `configs/sites/README.md`
+describes `respect_robots` and the other keys.
+
+Two things are worth knowing before relying on it:
+
+- **Costs three requests per item** for Google News (the signature page, the
+  decode, then the article) instead of one. `fulltext_max` is the knob, and
+  `per_host_interval` spaces the requests to the same host.
+- **`domain=` filtering does not apply to Google News items**, because their
+  published link is still `news.google.com`. The publisher is only known at body
+  fetch time, and the entry is not rewritten. `filter=` and `url_contains=` work
+  on the Google News URL; use `url=` with the publisher's own feed when you need
+  to select by site.
+
+The decoder talks to an undocumented Google endpoint that has already changed
+shape more than once, so it is written to fail quietly: a link that cannot be
+opened is counted in `X-Feedme-Fulltext` as a failure, its item keeps the
+teaser, and the feed is otherwise complete. `feedme probe <google news link>`
+reports what happened, including the publisher URL when it was obtained.
+
+A Google Alerts feed is an Atom feed, and works the same way as any other:
+`feeds[]=https://www.google.com/alerts/feeds/<id>/<id>&fulltext=1`. Its items are
+click-through links of the first kind, so they come out pointing straight at the
+publisher and `domain=` selects by site. The three items that stay without a body
+in any run are the publishers that refuse the request — a 403 from a paywalled
+site, or a page that is built client-side — and they keep their teaser, which is
+what a full-text feed does with a page it cannot read.
+
 ## Caching
 
 Two caches sit between a reader and the source site, both in SQLite:
@@ -326,7 +401,7 @@ fills in fields the request left empty: a selector given in the feed URL always
 wins. The keys are `title`, `body`, `strip`, `item`, `url`, `date`, `summary`,
 `strip_id_or_class`, `tidy`, `prune`, `autodetect_on_failure`,
 `single_page_link`, `next_page_link`, `categories`, `test_urls`, plus
-`force_host` and `allow_cross_host`. See
+`force_host`, `allow_cross_host`, and `respect_robots`. See
 [`configs/sites/README.md`](configs/sites/README.md).
 
 Selectors given in the URL win over the site config, which only fills in fields
@@ -404,6 +479,9 @@ from:
 - **Feed** — the generated `/extract` link, with a copy button that puts the
   whole URL on the clipboard. The link shown is shortened in the middle; the
   copy button and the link's tooltip carry it in full.
+- **Preview** — builds the feed again from its own configuration and shows its
+  items as a page, so a feed can be checked without pasting its URL anywhere.
+  It reads the source, not the stored copy.
 - **Item** — how many entries the newest build produced.
 - **Built** — when that build ran, as a distance (`3h ago`); the exact time is
   in the tooltip.
@@ -413,6 +491,13 @@ from:
   error is shown).
 - **Action** — **Refresh now** rebuilds through the same path a reader takes,
   and **Forget** removes the feed from the list and drops its build history.
+
+The toolbar also has **Export OPML**, which serves every listed feed as one
+OPML 2.0 file — one `outline` per feed, with the `/extract` URL as its
+`xmlUrl` and the page it was built from as its `htmlUrl`. A reader imports the
+file in one step and nothing about feed URLs changes. The download is an
+attachment named for the day, and it lists the same feeds the page shows,
+because both are read from the build history.
 
 The header sorts the list (`?sort=source`, `feed`, `items`, `built`, or
 `state`, with `?dir=asc`/`desc`) and offers a select-all checkbox. Checking rows
@@ -429,7 +514,8 @@ removes it.
 
 The management page is open by default, which suits a server on localhost or a
 trusted network. Set `FEEDME_ADMIN_TOKEN` — or pass `-admin-token` — and
-`/feeds` asks for it before it shows anything or accepts an action.
+`/feeds` asks for it before it shows anything or accepts an action, the export
+included.
 
 A browser is sent to a sign-in form at `/login`, which trades the token for a
 session cookie scoped to `/feeds`; closing the browser ends the session. It is a
@@ -444,7 +530,10 @@ command-line flag is visible in the process list to every user on the machine.
 
 ## Security
 
-- **robots.txt** is honoured by default.
+- **robots.txt** is honoured by default. A site config may opt one host out
+  (`respect_robots: false`), which is what makes a feed readable at a publisher
+  that forbids its own feed path; `-no-robots` turns the check off everywhere and
+  is the heavier of the two.
 - **SSRF protection**: hostnames resolving to private, loopback, link-local, or
   reserved addresses are refused unless `-allow-private` is set.
 - **Size limits**: bodies are capped (`max_body_bytes`), as is the number of
@@ -464,6 +553,9 @@ command-line flag is visible in the process list to every user on the machine.
   page it is given.
 - Full text fetches at most 20 article bodies per request by default; raise
   `fulltext_max` (up to 200) to fetch more.
+- Google News links are resolved through an undocumented Google endpoint. It
+  answers today and may stop; the failure mode is a feed with teasers, not an
+  error, and nothing else in the program depends on it.
 - Auto-detection is good but not magic. Reach for `feedme probe` and an explicit
   selector when it guesses wrong.
 - `FEEDME_ADMIN_TOKEN` is one password shared by everyone who manages the

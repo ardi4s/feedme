@@ -462,6 +462,7 @@ const feedsToolbar = `<div class="toolbar">` +
 	`</select>` +
 	`<button id="bulk-apply" class="btn" type="submit">Apply</button>` +
 	`</form>` +
+	`<a class="btn" href="/feeds/opml" title="Download every listed feed as OPML, for import into a reader">Export OPML</a>` +
 	`</div>`
 
 func writeFeedsHead(b *strings.Builder, spec sortSpec) {
@@ -569,16 +570,35 @@ func writeFeedCell(b *strings.Builder, f BuiltFeed) {
 	b.WriteString(`</td>`)
 }
 
-// writeRowActions puts the two per-feed actions in their own form. The form is
+// writeRowActions puts the per-feed actions in their own form. The form is
 // inline in the cell rather than one form around the table, because the bulk
-// checkboxes already belong to the toolbar's form and forms cannot nest.
+// checkboxes already belong to the toolbar's form and forms cannot nest. The
+// preview link sits outside the form: it is a read, and it opens in its own tab
+// like the source and feed links do.
 func writeRowActions(b *strings.Builder, key string) {
 	b.WriteString(`<td class="action"><div class="actions">`)
+	if preview, ok := previewURLFor(key); ok {
+		fmt.Fprintf(b, `<a class="btn" href="%s" title="Build the feed again and show its items" `+
+			`target="_blank" rel="noopener">Preview</a>`, html.EscapeString(preview))
+	}
 	b.WriteString(`<form method="post" action="/feeds">`)
 	fmt.Fprintf(b, `<input type="hidden" name="key" value="%s">`, html.EscapeString(key))
 	b.WriteString(`<button class="btn" type="submit" name="action" value="refresh">Refresh</button>`)
 	b.WriteString(`<button class="btn danger" type="submit" name="action" value="forget">Forget</button>`)
 	b.WriteString(`</form></div></td>`)
+}
+
+// previewURLFor swaps a feed URL's path for the preview page and keeps the
+// query verbatim, because the query is the feed's configuration: a preview
+// built from it shows exactly what the feed produces. A key that is not a URL
+// yields no link rather than a broken one.
+func previewURLFor(key string) (string, bool) {
+	u, err := url.Parse(key)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", false
+	}
+	u.Path = "/preview"
+	return u.String(), true
 }
 
 // feedsScript is the whole page's JavaScript: select-all, the group checkbox

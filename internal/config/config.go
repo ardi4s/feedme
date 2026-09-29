@@ -114,6 +114,16 @@ type Site struct {
 
 	Categories []string `yaml:"categories"`
 	TestURLs   []string `yaml:"test_urls"`
+
+	// RespectRobots overrides the global robots.txt decision for this host.
+	// Nil states no opinion.
+	//
+	// It exists for the publishers who forbid automated clients from the very
+	// path that serves their feed — Google News and Google Alerts both do — and
+	// it is a per-host opt-in on purpose. Turning the check off everywhere is
+	// one flag away, and one flag away is not a decision an operator should make
+	// by accident.
+	RespectRobots *bool `yaml:"respect_robots"`
 }
 
 // CrossHost reports whether a site config allows links to sibling subdomains.
@@ -310,6 +320,22 @@ func (s *Store) Get(host string) *Site {
 		return nil
 	}
 	return chain[0]
+}
+
+// RobotsFor reports whether robots.txt should be honoured for a host, given the
+// global setting.
+//
+// The lookup walks the same override chain the selectors use and takes the first
+// config that states an opinion, so an exact-host config can override a parent
+// domain's and a config that says nothing is never treated as permission. A host
+// nobody configured keeps the global setting.
+func (s *Store) RobotsFor(host string, global bool) bool {
+	for _, site := range s.Lookup(host) {
+		if site.RespectRobots != nil {
+			return *site.RespectRobots
+		}
+	}
+	return global
 }
 
 // Count reports how many site configs were loaded. It is used for a startup log

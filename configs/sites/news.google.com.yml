@@ -1,0 +1,5 @@
+# Google News serves its RSS from a path its own robots.txt disallows to every
+# client. The feed is a published endpoint, not a crawl target: it is meant to be
+# read by a feed reader, which is what this is. The file's name scopes it, so no
+# host key is needed and no other Google host is affected.
+respect_robots: false

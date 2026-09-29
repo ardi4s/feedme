@@ -24,8 +24,14 @@ import (
 // agentToken is the lowercase substring matched against robots.txt groups.
 const agentToken = "feedme"
 
-// ErrRobotsDenied is returned when robots.txt disallows a path.
-var ErrRobotsDenied = errors.New("blocked by robots.txt")
+// ErrRobotsDenied is returned when robots.txt disallows a path. The text names
+// the two ways out, because "blocked" on its own leaves the reader with nothing
+// to do and the block is not always the end of the story: a publisher that
+// forbids its own feed path can still be read one host at a time, and an
+// operator who accepts that can say so in a config rather than in a flag that
+// silences the check everywhere.
+var ErrRobotsDenied = errors.New("blocked by robots.txt " +
+	"(a site config for that host with respect_robots: false, or -no-robots, will read it anyway)")
 
 // ErrTooLarge is returned when a response exceeds the configured body cap.
 var ErrTooLarge = errors.New("response body exceeds size limit")
@@ -92,6 +98,10 @@ type Client struct {
 	robots   *RobotsCache
 	respect  bool
 	cacheTTL time.Duration
+	// robotsFor opts a single host out of the robots.txt check, so that a
+	// publisher whose own feed path is forbidden to automated clients can still
+	// be read on that one host. Nil means the check applies everywhere.
+	robotsFor func(host string) bool
 
 	// onStore is called with every fresh response so the caller can persist it.
 	onStore func(ctx context.Context, r *Response) error
@@ -112,6 +122,10 @@ type Options struct {
 	CacheTTL       time.Duration
 	OnStore        func(ctx context.Context, r *Response) error
 	CacheGet       func(ctx context.Context, u string) (*Response, bool)
+	// RobotsFor overrides the robots.txt decision for one host. Returning false
+	// skips the check for that host only; every other host keeps the global
+	// RespectRobots setting.
+	RobotsFor func(host string) bool
 }
 
 // New builds a Client.
@@ -151,15 +165,16 @@ func New(o Options) *Client {
 				return nil
 			},
 		},
-		ua:       o.UserAgent,
-		timeout:  o.Timeout,
-		maxBody:  o.MaxBodyBytes,
-		sem:      make(chan struct{}, o.GlobalParallel),
-		hosts:    newHostLimiter(o.PerHostGap),
-		respect:  o.RespectRobots,
-		cacheTTL: o.CacheTTL,
-		onStore:  o.OnStore,
-		cacheGet: o.CacheGet,
+		ua:        o.UserAgent,
+		timeout:   o.Timeout,
+		maxBody:   o.MaxBodyBytes,
+		sem:       make(chan struct{}, o.GlobalParallel),
+		hosts:     newHostLimiter(o.PerHostGap),
+		respect:   o.RespectRobots,
+		robotsFor: o.RobotsFor,
+		cacheTTL:  o.CacheTTL,
+		onStore:   o.OnStore,
+		cacheGet:  o.CacheGet,
 	}
 	if c.respect {
 		c.robots = NewRobotsCache(c, o.CacheTTL)
@@ -196,7 +211,7 @@ func (c *Client) get(ctx context.Context, rawURL string, forceFresh, skipRobots 
 		}
 	}
 
-	if c.respect && !skipRobots {
+	if c.respect && !skipRobots && c.robotsApply(u) {
 		ok, err := c.robots.Allowed(ctx, u)
 		if err != nil {
 			return nil, err
@@ -233,45 +248,22 @@ func (c *Client) get(ctx context.Context, rawURL string, forceFresh, skipRobots 
 	}
 	defer resp.Body.Close()
 
-	out := &Response{
-		URL:          key,
-		Status:       resp.StatusCode,
-		ETag:         resp.Header.Get("ETag"),
-		LastModified: resp.Header.Get("Last-Modified"),
-		ContentType:  resp.Header.Get("Content-Type"),
-		FetchedAt:    time.Now(),
+	out := newResponse(key, resp)
+	if err := c.readBody(out, resp); err != nil {
+		return out, err
 	}
-	if resp.Request != nil && resp.Request.URL != nil {
-		out.URL = normalizeURL(resp.Request.URL)
-	}
-
-	if resp.StatusCode == http.StatusNotModified {
-		out.NotModified = true
+	if out.NotModified {
 		return out, nil
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// Drain a little so the connection can be reused, then report.
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		resp.Body.Close()
-		return out, statusError(out.URL, resp.StatusCode, body)
-	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, c.maxBody+1))
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", out.URL, err)
-	}
-	if int64(len(body)) > c.maxBody {
-		return nil, fmt.Errorf("%s: %w (%d bytes)", out.URL, ErrTooLarge, c.maxBody)
-	}
 	// A 2xx status is not proof of a document. Bot-protection layers commonly
 	// answer with 202 and a small interstitial, which would otherwise be
 	// "successfully" extracted as if it were the article.
-	if marker, challenged := detectChallenge(resp, body); challenged {
+	if marker, challenged := detectChallenge(resp, out.Body); challenged {
 		return out, &ChallengeError{
-			URL: out.URL, Code: resp.StatusCode, Size: len(body), Marker: marker,
+			URL: out.URL, Code: out.Status, Size: len(out.Body), Marker: marker,
 		}
 	}
-	out.Body = body
 
 	if c.onStore != nil && !forceFresh {
 		// Only a response a later caller could be served from the cache is
@@ -283,6 +275,115 @@ func (c *Client) get(ctx context.Context, rawURL string, forceFresh, skipRobots 
 		}
 	}
 	return out, nil
+}
+
+// Post sends a POST request and reads the response.
+//
+// It exists for the few endpoints that answer a question rather than serving a
+// document — the Google News decoder is the only one — so it is deliberately not
+// cached: a stored answer would be a stored redirect decision, and the caller
+// asks on every rebuild because links expire. Robots, the size cap, the
+// per-host gap and the SSRF check all apply exactly as they do to Get, because
+// this request reaches a third party's server exactly as much.
+func (c *Client) Post(ctx context.Context, rawURL, contentType string, body []byte) (*Response, error) {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return nil, fmt.Errorf("parse %q: %w", rawURL, err)
+	}
+	if err := validateURL(u); err != nil {
+		return nil, fmt.Errorf("%q: %w", rawURL, err)
+	}
+	key := normalizeURL(u)
+
+	if c.respect && c.robotsApply(u) {
+		ok, err := c.robots.Allowed(ctx, u)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, fmt.Errorf("%s: %w", key, ErrRobotsDenied)
+		}
+	}
+
+	select {
+	case c.sem <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	defer func() { <-c.sem }()
+
+	if err := c.hosts.wait(ctx, u.Hostname()); err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	applyHeaders(req, c.ua)
+	req.Header.Set("Content-Type", contentType)
+
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("post %s: timeout", key)
+		}
+		return nil, fmt.Errorf("post %s: %w", key, err)
+	}
+	defer resp.Body.Close()
+
+	out := newResponse(key, resp)
+	if err := c.readBody(out, resp); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+// robotsApply reports whether the robots.txt check covers this URL. A host that
+// opts out through RobotsFor is not checked; everything else is.
+func (c *Client) robotsApply(u *url.URL) bool {
+	return c.robotsFor == nil || c.robotsFor(u.Hostname())
+}
+
+// newResponse builds the Response shell for a completed request, recording the
+// URL the response actually came from rather than the one that was asked for.
+func newResponse(key string, resp *http.Response) *Response {
+	out := &Response{
+		URL:          key,
+		Status:       resp.StatusCode,
+		ETag:         resp.Header.Get("ETag"),
+		LastModified: resp.Header.Get("Last-Modified"),
+		ContentType:  resp.Header.Get("Content-Type"),
+		FetchedAt:    time.Now(),
+	}
+	if resp.Request != nil && resp.Request.URL != nil {
+		out.URL = normalizeURL(resp.Request.URL)
+	}
+	return out
+}
+
+// readBody fills out.Body, turning a conditional hit, a non-2xx status or an
+// oversized body into the error that belongs to it.
+func (c *Client) readBody(out *Response, resp *http.Response) error {
+	if resp.StatusCode == http.StatusNotModified {
+		out.NotModified = true
+		return nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// Drain a little so the connection can be reused, then report.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+		return statusError(out.URL, resp.StatusCode, body)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, c.maxBody+1))
+	if err != nil {
+		return fmt.Errorf("read %s: %w", out.URL, err)
+	}
+	if int64(len(body)) > c.maxBody {
+		return fmt.Errorf("%s: %w (%d bytes)", out.URL, ErrTooLarge, c.maxBody)
+	}
+	out.Body = body
+	return nil
 }
 
 // DecodeBody converts a response body to UTF-8.

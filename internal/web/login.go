@@ -25,6 +25,13 @@ import (
 
 const (
 	feedsPath = "/feeds"
+	// opmlPath is the same feed list as feedsPath, in OPML rather than HTML.
+	// It sits behind the same gate because it shows everything the gate hides,
+	// and it is a path below feedsPath rather than a sibling spelling of it,
+	// because the session cookie's Path=/feeds only travels to paths below
+	// /feeds: /feeds.opml would not carry the cookie and a signed-in operator
+	// clicking the export link would be sent back to the sign-in form.
+	opmlPath  = "/feeds/opml"
 	loginPath = "/login"
 
 	// sessionCookieName is the cookie the sign-in form sets.

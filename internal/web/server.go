@@ -159,9 +159,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleCheck(w, r)
 	case "/preview":
 		s.handlePreview(w, r)
-	case feedsPath:
+	case feedsPath, opmlPath:
 		if s.authorizeManage(w, r) {
-			s.handleFeeds(w, r)
+			if path == opmlPath {
+				s.handleFeedsOPML(w, r)
+			} else {
+				s.handleFeeds(w, r)
+			}
 		}
 	case loginPath:
 		s.handleLogin(w, r)

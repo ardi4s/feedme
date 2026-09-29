@@ -13,28 +13,34 @@ import (
 	"feedme/internal/config"
 	"feedme/internal/extract"
 	"feedme/internal/fetch"
+	"feedme/internal/gnews"
+	"feedme/internal/redirect"
 )
 
 // probeOutput is the machine-readable form of a probe run.
 type probeOutput struct {
-	URL         string            `json:"url"`
-	FinalURL    string            `json:"final_url"`
-	Status      int               `json:"status"`
-	ContentType string            `json:"content_type"`
-	Strategy    string            `json:"strategy"`
-	Title       string            `json:"title"`
-	Byline      string            `json:"byline,omitempty"`
-	Published   string            `json:"published,omitempty"`
-	SiteName    string            `json:"site_name,omitempty"`
-	Image       string            `json:"image,omitempty"`
-	Lang        string            `json:"lang,omitempty"`
-	Canonical   string            `json:"canonical,omitempty"`
-	WordCount   int               `json:"word_count"`
-	Excerpt     string            `json:"excerpt,omitempty"`
-	ContentHTML string            `json:"content_html,omitempty"`
-	Attempts    []extract.Attempt `json:"attempts"`
-	Error       string            `json:"error,omitempty"`
-	Elapsed     string            `json:"elapsed"`
+	URL         string `json:"url"`
+	FinalURL    string `json:"final_url"`
+	Status      int    `json:"status"`
+	ContentType string `json:"content_type"`
+	Strategy    string `json:"strategy"`
+	Title       string `json:"title"`
+	Byline      string `json:"byline,omitempty"`
+	Published   string `json:"published,omitempty"`
+	SiteName    string `json:"site_name,omitempty"`
+	Image       string `json:"image,omitempty"`
+	Lang        string `json:"lang,omitempty"`
+	Canonical   string `json:"canonical,omitempty"`
+	WordCount   int    `json:"word_count"`
+	Excerpt     string `json:"excerpt,omitempty"`
+	ContentHTML string `json:"content_html,omitempty"`
+	// Resolved is the publisher URL when the URL given was a click-through
+	// link. It is reported separately because the link the reader follows and
+	// the page that was actually read are rarely the same thing.
+	Resolved string            `json:"resolved,omitempty"`
+	Attempts []extract.Attempt `json:"attempts"`
+	Error    string            `json:"error,omitempty"`
+	Elapsed  string            `json:"elapsed"`
 }
 
 // runProbe fetches a URL and reports what the extraction cascade found. It is
@@ -108,6 +114,11 @@ func runProbe(args []string) error {
 		return fmt.Errorf("load site configs: %w", err)
 	}
 
+	var logger *slog.Logger
+	if *debug {
+		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	}
+
 	var (
 		out      probeOutput
 		finalURL = pageURL
@@ -117,20 +128,39 @@ func runProbe(args []string) error {
 	)
 
 	if body == nil {
+		robots := cfg.Robots()
 		client := fetch.New(fetch.Options{
 			UserAgent:      cfg.UserAgent,
 			Timeout:        cfg.Timeout,
 			MaxBodyBytes:   cfg.MaxBodyBytes,
 			GlobalParallel: cfg.GlobalConcurrency,
 			PerHostGap:     0, // probing a single page needs no politeness delay
-			RespectRobots:  cfg.Robots(),
+			RespectRobots:  robots,
 			AllowPrivate:   cfg.AllowPrivate,
 			CacheTTL:       cfg.CacheTTL,
+			RobotsFor: func(host string) bool {
+				return sites.RobotsFor(host, robots)
+			},
 		})
 		ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout+10*time.Second)
 		defer cancel()
 		start := time.Now()
-		resp, err := client.Get(ctx, pageURL, true)
+
+		// A click-through link is opened before the fetch, so that probing a
+		// Google News or Bing News item reports what the publisher's page looks
+		// like rather than what the aggregator's shell looks like.
+		target, opened, err := openLink(ctx, client, pageURL, logger)
+		if err != nil {
+			out.URL = pageURL
+			out.Error = err.Error()
+			out.Elapsed = time.Since(start).String()
+			return emit(&out, *asJSON, *showHTML, fs)
+		}
+		if opened {
+			out.Resolved = target
+		}
+
+		resp, err := client.Get(ctx, target, true)
 		elapsed = time.Since(start)
 		if err != nil {
 			out.URL = pageURL
@@ -158,11 +188,6 @@ func runProbe(args []string) error {
 	var site *config.Site
 	if s := sites.Get(host); s != nil {
 		site = s
-	}
-
-	var logger *slog.Logger
-	if *debug {
-		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
 
 	art, xerr := extract.FromHTML(body, extract.Options{
@@ -201,6 +226,26 @@ func runProbe(args []string) error {
 		}
 	}
 	return emit(&out, *asJSON, *showHTML, fs)
+}
+
+// openLink returns the URL a probe should fetch, opening a click-through link
+// when the URL given is one, and reports whether it opened anything.
+//
+// A link it recognises but cannot open is an error rather than a fallback to
+// probing the wrapper: the wrapper's page is the shell the reader never sees,
+// and reporting on it would answer a question nobody asked.
+func openLink(ctx context.Context, client *fetch.Client, rawURL string, logger *slog.Logger) (string, bool, error) {
+	if target, ok := redirect.Unwrap(rawURL); ok {
+		return target, true, nil
+	}
+	target, recognized, err := gnews.NewResolver(client, logger).Resolve(ctx, rawURL)
+	if err != nil {
+		return "", true, err
+	}
+	if recognized {
+		return target, true, nil
+	}
+	return rawURL, false, nil
 }
 
 // readabilityLikely reports whether a response looks like it contains real
@@ -242,6 +287,9 @@ func emit(out *probeOutput, asJSON, showHTML bool, fs *flagSet) error {
 	}
 	fmt.Fprintln(w, "── fetch ──────────────────────────────")
 	line("URL", out.URL)
+	if out.Resolved != "" {
+		line("Opened", out.Resolved)
+	}
 	line("Final", out.FinalURL)
 	if out.Status != 0 {
 		line("Status", fmt.Sprintf("%d", out.Status))

@@ -1,0 +1,4 @@
+# A Google Alerts feed lives at www.google.com/alerts/feeds/... and google.com
+# disallows exactly that path. Only the alerts feed is concerned, so this is
+# scoped to the one host rather than turned off everywhere with -no-robots.
+respect_robots: false
