@@ -30,10 +30,10 @@ Newest first. Versions are `MAJOR.MINOR.PATCH`.
   [Google News, Google Alerts, and click-through links](README.md#google-news-google-alerts-and-click-through-links).
 - Click-through links that name their destination in their own query string —
   Google Alerts and Bing News among them — are opened before the feed is
-  filtered, so the item is published with the publisher's link and a
-  `filter=example.com` or `domain=` rule matches the article rather than the
-  aggregator. A Google Alerts feed is now a full-text feed, like any other feed
-  you can hand `feeds[]`.
+  filtered, so the item is published with the publisher's link and a `domain=`
+  or `url_contains=` rule matches the article rather than the aggregator. A
+  Google Alerts feed is now a full-text feed, like any other feed you can hand
+  `feeds[]` or `url`.
 - Google's click-through is read under both parameter names it uses: `url` for
   an Alerts item and `q` for a search-result link. Reading only one of them
   would have left every Alerts item a wrapper.

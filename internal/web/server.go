@@ -900,9 +900,9 @@ feed URL, so a feed is a URL you can edit, share, and keep.</p>
   <summary>Source</summary>
   <div class="group-body">
    <div class="field">
-    <label for="url">Listing page URL</label>
+    <label for="url">Listing page or feed URL</label>
     <input id="url" name="url" type="url" placeholder="https://example.com/news">
-    <span class="hint">Optional when you merge existing feeds below.</span>
+    <span class="hint">An existing feed is read as one. Optional when you merge existing feeds below.</span>
    </div>
    <div class="row">
     <div class="field">

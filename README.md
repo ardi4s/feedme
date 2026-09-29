@@ -163,10 +163,16 @@ booleans, where a present-but-empty value is `false`.
 
 | Parameter | Default | Meaning |
 | --- | --- | --- |
-| `url` | | The listing page to build a feed from. Required unless `feeds` is given. Must be `http` or `https`. |
+| `url` | | The listing page to build a feed from, or an existing feed to read as one. Required unless `feeds` is given. Must be `http` or `https`. |
 | `feeds` | | One or more existing RSS, Atom, or JSON Feed URLs to read and merge. Repeatable (bare or `feeds[]`). |
 | `id_or_class` | | A bare element id or class name, e.g. `news-item`. A short way to say `item`. Cannot be combined with `item`. |
 | `keep_qs_params` | `1` | Query string for item links: `1` keeps everything (minus campaign noise), `0` drops it, or a comma-separated list of parameter names to keep. |
+
+A `url` that is already a feed is read as what it is, so a feed address copied
+out of a reader works where it was copied, and `url` and `feeds[]` give the same
+feed for the same document. The body is already fetched, so a feed costs no
+request that a listing page does not. A page that merely mentions a feed URL is
+still read as a page.
 
 ### Extraction
 
@@ -285,7 +291,7 @@ Two kinds, handled differently on purpose:
   click-through `google.com/url?…&url=…` (Google Alerts) or `…&q=…` (a plain
   search result), and Bing News' `bing.com/news/apiclick.aspx?…&url=…` — are
   read, not fetched. They cost no request, so the item is published with the
-  publisher's own link, and filters like `filter=example.com` and `domain=` see
+  publisher's own link, and filters like `domain=` and `url_contains=` see
   the publisher rather than the aggregator. A wrapper that answers with a
   redirect instead of naming its target costs one request, which is what a
   redirect is, and lands in the same place.
@@ -298,12 +304,6 @@ Two kinds, handled differently on purpose:
 ```
 /extract?url=https://news.google.com/rss/search?q=agentic+ai&hl=en-US&gl=US&ceid=US:en&fulltext=1
 ```
-
-A feed address works in `url` as well as in `feeds[]`, and gives the same feed
-either way. That is the field a reader copies an address into, and one that is
-already a feed has nothing for the listing path to find. The document is read as
-what it is, so this costs no request that a listing page would not. A page that
-merely mentions a feed URL is still read as a page.
 
 Google News and Google Alerts both forbid automated clients from the very path
 that serves their feed (`news.google.com` disallows everything, `google.com`
@@ -330,9 +330,9 @@ Two things are worth knowing before relying on it:
   `per_host_interval` spaces the requests to the same host.
 - **`domain=` filtering does not apply to Google News items**, because their
   published link is still `news.google.com`. The publisher is only known at body
-  fetch time, and the entry is not rewritten. `filter=` and `url_contains=` work
-  on the Google News URL; use `url=` with the publisher's own feed when you need
-  to select by site.
+  fetch time, and the entry is not rewritten. `url_contains=` and
+  `text_contains=` work on the Google News URL; use `url=` with the publisher's
+  own feed when you need to select by site.
 
 The decoder talks to an undocumented Google endpoint that has already changed
 shape more than once, so it is written to fail quietly: a link that cannot be
@@ -341,12 +341,12 @@ teaser, and the feed is otherwise complete. `feedme probe <google news link>`
 reports what happened, including the publisher URL when it was obtained.
 
 A Google Alerts feed is an Atom feed, and works the same way as any other:
-`feeds[]=https://www.google.com/alerts/feeds/<id>/<id>&fulltext=1`. Its items are
-click-through links of the first kind, so they come out pointing straight at the
-publisher and `domain=` selects by site. The three items that stay without a body
-in any run are the publishers that refuse the request — a 403 from a paywalled
-site, or a page that is built client-side — and they keep their teaser, which is
-what a full-text feed does with a page it cannot read.
+`url=https://www.google.com/alerts/feeds/<id>/<id>&fulltext=1`, or the same
+address in `feeds[]`. Its items are click-through links of the first kind, so
+they come out pointing straight at the publisher and `domain=` selects by site.
+The items that stay without a body are the publishers that refuse the request — a
+403 from a paywalled site, or a page that is built client-side — and they keep
+their teaser, which is what a full-text feed does with a page it cannot read.
 
 ## Caching
 
