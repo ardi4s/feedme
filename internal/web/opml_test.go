@@ -9,10 +9,13 @@ import (
 	"testing"
 )
 
-// The OPML export is the management page's feed list in another format, so it
+// The OPML/CSV/JSON export is the management page's feed list in another format, so it
 // sits behind the same gate and answers with the same credentials. These tests
 // pin the boundary and the document shape: a reader that imports the file gets
 // one outline per listed feed, with the feed URL it can subscribe to.
+
+// opmlExportPath is the new export endpoint with format=opml
+const opmlExportPath = "/feeds/export?format=opml"
 
 func TestOPMLRequiresTheToken(t *testing.T) {
 	// Admin is nil here, so a request that clears the gate answers 404 rather
@@ -32,7 +35,7 @@ func TestOPMLRequiresTheToken(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			rec := doDecorated(t, s, http.MethodGet, opmlPath, tc.decorate)
+			rec := doDecorated(t, s, http.MethodGet, opmlExportPath, tc.decorate)
 			if rec.Code != tc.want {
 				t.Errorf("got %d, want %d", rec.Code, tc.want)
 			}
@@ -44,7 +47,7 @@ func TestOPMLOpenWithoutAToken(t *testing.T) {
 	// No token means no login at all and the export behaves as it did before
 	// auth existed, exactly as the page does. The admin is wired, so a 404 here
 	// would mean the document itself is broken, not the gate.
-	rec := do(t, adminServer(nil, newFakeAdmin()), http.MethodGet, opmlPath)
+	rec := do(t, adminServer(nil, newFakeAdmin()), http.MethodGet, opmlExportPath)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("got %d, want %d", rec.Code, http.StatusOK)
 	}
@@ -66,7 +69,7 @@ func TestOPMLListsEveryBuiltFeed(t *testing.T) {
 			SourceURL: "https://other.example/news",
 		},
 	}
-	rec := do(t, adminServer(nil, a), http.MethodGet, opmlPath)
+	rec := do(t, adminServer(nil, a), http.MethodGet, opmlExportPath)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("got %d, want %d", rec.Code, http.StatusOK)
 	}
@@ -106,7 +109,7 @@ func TestOPMLSurvivesQueryPunctuation(t *testing.T) {
 		Key:       "https://feedme.example/extract?url=https%3A%2F%2Fe.example%2Fn%3Fa%3D1%26b%3D2&fulltext=1&max=5",
 		SourceURL: "https://e.example/n?a=1&b=2",
 	}}
-	rec := do(t, adminServer(nil, a), http.MethodGet, opmlPath)
+	rec := do(t, adminServer(nil, a), http.MethodGet, opmlExportPath)
 	doc, err := parseOPML(rec.Body.Bytes())
 	if err != nil {
 		t.Fatalf("the body is not well-formed OPML: %v", err)
@@ -119,7 +122,7 @@ func TestOPMLSurvivesQueryPunctuation(t *testing.T) {
 func TestOPMLEmptyListIsAValidDocument(t *testing.T) {
 	// Nothing built yet is a normal answer, and a reader importing an empty
 	// file should see a document it can read rather than an error page.
-	rec := do(t, adminServer(nil, newFakeAdmin()), http.MethodGet, opmlPath)
+	rec := do(t, adminServer(nil, newFakeAdmin()), http.MethodGet, opmlExportPath)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("got %d, want %d", rec.Code, http.StatusOK)
 	}
@@ -137,7 +140,7 @@ func TestOPMLMergeFeedWithoutASourceIsNamed(t *testing.T) {
 	// feed URL rather than going out blank.
 	a := newFakeAdmin()
 	a.built = []BuiltFeed{{Key: "https://feedme.example/extract?feeds%5B%5D=https%3A%2F%2Fa.example%2Ffeed"}}
-	rec := do(t, adminServer(nil, a), http.MethodGet, opmlPath)
+	rec := do(t, adminServer(nil, a), http.MethodGet, opmlExportPath)
 	doc, err := parseOPML(rec.Body.Bytes())
 	if err != nil {
 		t.Fatalf("the body is not well-formed OPML: %v", err)
@@ -152,7 +155,7 @@ func TestOPMLHeaders(t *testing.T) {
 	// disposition names it, and no-store keeps a stale list out of a cache.
 	a := newFakeAdmin()
 	a.built = []BuiltFeed{{Key: "https://feedme.example/extract?url=https%3A%2F%2Fe.example"}}
-	rec := do(t, adminServer(nil, a), http.MethodGet, opmlPath)
+	rec := do(t, adminServer(nil, a), http.MethodGet, opmlExportPath)
 	if ct := rec.Header().Get("Content-Type"); ct != "text/x-opml; charset=utf-8" {
 		t.Errorf("Content-Type = %q", ct)
 	}
@@ -168,7 +171,7 @@ func TestOPMLHeaders(t *testing.T) {
 func TestOPMLHasNoStoreBodyWhenPOSTed(t *testing.T) {
 	// Only GET answers with a document; anything else is a method error, the
 	// same as the page.
-	rec := do(t, adminServer(nil, newFakeAdmin()), http.MethodPost, opmlPath)
+	rec := do(t, adminServer(nil, newFakeAdmin()), http.MethodPost, opmlExportPath)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("got %d, want %d", rec.Code, http.StatusMethodNotAllowed)
 	}
@@ -179,7 +182,10 @@ func TestFeedsPageLinksTheExport(t *testing.T) {
 	a := newFakeAdmin()
 	a.built = []BuiltFeed{{Key: "https://feedme.example/extract?url=https%3A%2F%2Fe.example"}}
 	body := do(t, adminServer(nil, a), http.MethodGet, feedsPath).Body.String()
-	at(t, body, `href="/feeds/opml"`)
+	// The toolbar now has three export links: OPML, CSV, JSON
+	at(t, body, `href="/feeds/export?format=opml"`)
+	at(t, body, `href="/feeds/export?format=csv"`)
+	at(t, body, `href="/feeds/export?format=json"`)
 }
 
 func TestOPMLAcceptsTheSessionCookie(t *testing.T) {
@@ -198,12 +204,27 @@ func TestOPMLAcceptsTheSessionCookie(t *testing.T) {
 		t.Errorf("cookie path = %q, want %q", cookie.Path, feedsPath)
 	}
 
+	// /feeds/opml now redirects to /feeds/export?format=opml
 	req := httptest.NewRequest(http.MethodGet, opmlPath, nil)
 	req.AddCookie(cookie)
 	rec := httptest.NewRecorder()
 	s.ServeHTTP(rec, req)
+	// Expect redirect to /feeds/export?format=opml
+	if rec.Code != http.StatusMovedPermanently {
+		t.Fatalf("expected redirect from %s, got %d", opmlPath, rec.Code)
+	}
+	loc := rec.Header().Get("Location")
+	if loc != exportPath+"?format=opml" {
+		t.Fatalf("redirect location = %q, want %q", loc, exportPath+"?format=opml")
+	}
+
+	// Follow the redirect and verify OPML
+	req = httptest.NewRequest(http.MethodGet, loc, nil)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("the session cookie did not reach %s: got %d", opmlPath, rec.Code)
+		t.Fatalf("the session cookie did not reach %s: got %d", loc, rec.Code)
 	}
 	if _, err := parseOPML(rec.Body.Bytes()); err != nil {
 		t.Fatalf("the body is not well-formed OPML: %v", err)

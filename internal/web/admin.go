@@ -462,7 +462,11 @@ const feedsToolbar = `<div class="toolbar">` +
 	`</select>` +
 	`<button id="bulk-apply" class="btn" type="submit">Apply</button>` +
 	`</form>` +
-	`<a class="btn" href="/feeds/opml" title="Download every listed feed as OPML, for import into a reader">Export OPML</a>` +
+	`<div class="export-menu">` +
+	`<a class="btn" href="/feeds/export?format=opml" title="Download every listed feed as OPML 2.0, for import into a reader">Export OPML</a>` +
+	`<a class="btn" href="/feeds/export?format=csv" title="Download every listed feed as CSV for spreadsheet import">Export CSV</a>` +
+	`<a class="btn" href="/feeds/export?format=json" title="Download every listed feed as JSON for programmatic use">Export JSON</a>` +
+	`</div>` +
 	`</div>`
 
 func writeFeedsHead(b *strings.Builder, spec sortSpec) {

@@ -1,16 +1,19 @@
 package web
 
 import (
+	"encoding/csv"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 )
 
-// The management page's feed list, in OPML 2.0. Export is what makes the list
-// worth keeping: a reader imports the file in one step and feedme stays a feed
-// source rather than growing into a reader.
+// The management page's feed list, exportable as OPML 2.0, CSV, or JSON.
+// Export is what makes the list worth keeping: a reader imports the file in
+// one step and feedme stays a feed source rather than growing into a reader.
 
 // opmlDoc is the document shape the OPML 2.0 spec's own example shows: a head
 // with a title and date, and a body of outlines. No namespace is emitted — the
@@ -40,11 +43,24 @@ type opmlOutline struct {
 	XMLURL  string `xml:"xmlUrl,attr"`
 }
 
-// handleFeedsOPML serves every feed the server has built as one OPML file. It
-// reads through the same BuiltFeeds call the page does, so the export cannot
-// disagree with the listing. The file is an attachment rather than a page, so a
-// browser downloads it instead of trying to render it.
-func (s *Server) handleFeedsOPML(w http.ResponseWriter, r *http.Request) {
+// exportFeed is a single feed record for CSV/JSON export.
+type exportFeed struct {
+	Key       string `json:"key" csv:"key"`
+	SourceURL string `json:"source_url" csv:"source_url"`
+	Format    string `json:"format" csv:"format"`
+	ItemCount int    `json:"item_count" csv:"item_count"`
+	Detector  string `json:"detector" csv:"detector"`
+	FetchedAt string `json:"fetched_at" csv:"fetched_at"`
+	ExpiresAt string `json:"expires_at" csv:"expires_at"`
+	Cached    bool   `json:"cached" csv:"cached"`
+	Stale     bool   `json:"stale" csv:"stale"`
+	LastError string `json:"last_error" csv:"last_error"`
+}
+
+// handleFeedsExport serves every feed the server has built in the requested
+// format (OPML, CSV, or JSON). It reads through the same BuiltFeeds call the
+// page does, so the export cannot disagree with the listing.
+func (s *Server) handleFeedsExport(w http.ResponseWriter, r *http.Request) {
 	if s.admin == nil {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -53,25 +69,53 @@ func (s *Server) handleFeedsOPML(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+
+	format := r.URL.Query().Get("format")
+	if format == "" {
+		format = "opml"
+	}
+
 	built, err := s.admin.BuiltFeeds(r.Context())
 	if err != nil {
 		s.fail(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
 	now := s.nowFn()
-	w.Header().Set("Content-Type", "text/x-opml; charset=utf-8")
-	w.Header().Set("Content-Disposition",
-		fmt.Sprintf(`attachment; filename="feedme-%s.opml"`, now.Format("2006-01-02")))
-	w.Header().Set("Cache-Control", "no-store")
-	if err := writeOPML(w, built, now); err != nil {
-		// The headers are already gone, so there is no useful status left to
-		// send; the log is where a truncated download gets explained.
-		s.log.Error("opml write failed", "error", err.Error())
+
+	switch format {
+	case "opml":
+		w.Header().Set("Content-Type", "text/x-opml; charset=utf-8")
+		w.Header().Set("Content-Disposition",
+			fmt.Sprintf(`attachment; filename="feedme-%s.opml"`, now.Format("2006-01-02")))
+		w.Header().Set("Cache-Control", "no-store")
+		if err := writeOPML(w, built, now); err != nil {
+			s.log.Error("opml write failed", "error", err.Error())
+		}
+
+	case "csv":
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set("Content-Disposition",
+			fmt.Sprintf(`attachment; filename="feedme-%s.csv"`, now.Format("2006-01-02")))
+		w.Header().Set("Cache-Control", "no-store")
+		if err := writeCSV(w, built); err != nil {
+			s.log.Error("csv write failed", "error", err.Error())
+		}
+
+	case "json":
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Content-Disposition",
+			fmt.Sprintf(`attachment; filename="feedme-%s.json"`, now.Format("2006-01-02")))
+		w.Header().Set("Cache-Control", "no-store")
+		if err := writeJSON(w, built); err != nil {
+			s.log.Error("json write failed", "error", err.Error())
+		}
+
+	default:
+		s.fail(w, r, http.StatusBadRequest, "unsupported format: "+format+" (use opml, csv, or json)")
 	}
 }
 
-// writeOPML renders the feed list. The encoder does the escaping, which matters
-// because a feed URL is a query string and its & and = are everywhere.
+// writeOPML renders the feed list as OPML 2.0.
 func writeOPML(w io.Writer, feeds []BuiltFeed, now time.Time) error {
 	doc := opmlDoc{
 		Version: "2.0",
@@ -99,4 +143,56 @@ func writeOPML(w io.Writer, feeds []BuiltFeed, now time.Time) error {
 		return err
 	}
 	return enc.Flush()
+}
+
+// writeCSV renders the feed list as CSV.
+func writeCSV(w io.Writer, feeds []BuiltFeed) error {
+	wr := csv.NewWriter(w)
+	defer wr.Flush()
+
+	header := []string{"key", "source_url", "format", "item_count", "detector", "fetched_at", "expires_at", "cached", "stale", "last_error"}
+	if err := wr.Write(header); err != nil {
+		return err
+	}
+
+	for _, f := range feeds {
+		record := []string{
+			f.Key,
+			f.SourceURL,
+			f.Format,
+			strconv.Itoa(f.ItemCount),
+			f.Detector,
+			f.FetchedAt.Format(http.TimeFormat),
+			f.ExpiresAt.Format(http.TimeFormat),
+			strconv.FormatBool(f.Cached),
+			strconv.FormatBool(f.Stale),
+			f.LastError,
+		}
+		if err := wr.Write(record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeJSON renders the feed list as JSON.
+func writeJSON(w io.Writer, feeds []BuiltFeed) error {
+	export := make([]exportFeed, len(feeds))
+	for i, f := range feeds {
+		export[i] = exportFeed{
+			Key:       f.Key,
+			SourceURL: f.SourceURL,
+			Format:    f.Format,
+			ItemCount: f.ItemCount,
+			Detector:  f.Detector,
+			FetchedAt: f.FetchedAt.Format(http.TimeFormat),
+			ExpiresAt: f.ExpiresAt.Format(http.TimeFormat),
+			Cached:    f.Cached,
+			Stale:     f.Stale,
+			LastError: f.LastError,
+		}
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(export)
 }

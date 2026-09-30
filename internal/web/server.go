@@ -8,10 +8,12 @@
 package web
 
 import (
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -19,6 +21,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/andybalholm/brotli"
 
 	"feedme/internal/feed"
 	"feedme/internal/feedurl"
@@ -164,10 +168,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleCheck(w, r)
 	case "/preview":
 		s.handlePreview(w, r)
-	case feedsPath, opmlPath:
+	case feedsPath, opmlPath, exportPath:
 		if s.authorizeManage(w, r) {
-			if path == opmlPath {
-				s.handleFeedsOPML(w, r)
+			if path == exportPath {
+				s.handleFeedsExport(w, r)
+			} else if path == opmlPath {
+				// Backwards compatibility: /feeds/opml redirects to /feeds/export?format=opml
+				http.Redirect(w, r, exportPath+"?format=opml", http.StatusMovedPermanently)
 			} else {
 				s.handleFeeds(w, r)
 			}
@@ -399,14 +406,25 @@ func detectionOf(res *pipeline.Result) *listpage.Result {
 // responseFromCache converts a stored feed back into a response. There is no run
 // behind it, so the full-text, detection and page-cache headers are left off
 // rather than guessed at: nothing was fetched, so claiming a page cache hit would
-// misdescribe what happened.
+// misdescribe what happened. However, the detector and confidence are stored
+// in the cache, so we reconstruct a minimal result for the headers.
 func responseFromCache(c *CachedFeed) feedResponse {
+	var res *pipeline.Result
+	if c.Detector != "" {
+		res = &pipeline.Result{
+			Detection: &listpage.Result{
+				Selector:   c.Detector,
+				Confidence: c.Confidence,
+			},
+		}
+	}
 	return feedResponse{
 		body:         c.Body,
 		etag:         c.ETag,
 		contentType:  c.ContentType,
 		itemCount:    c.ItemCount,
 		lastModified: c.FetchedAt,
+		result:       res,
 	}
 }
 
@@ -439,6 +457,40 @@ func confidenceOf(det *listpage.Result) string {
 	return det.Confidence
 }
 
+// compressWriter wraps an http.ResponseWriter to provide transparent compression.
+type compressWriter struct {
+	http.ResponseWriter
+	writer   io.WriteCloser
+	encoding string
+}
+
+func newCompressWriter(w http.ResponseWriter, encoding string) *compressWriter {
+	var cw compressWriter
+	cw.ResponseWriter = w
+	cw.encoding = encoding
+	switch encoding {
+	case "br":
+		cw.writer = brotli.NewWriterLevel(w, brotli.BestSpeed)
+	case "gzip":
+		cw.writer = gzip.NewWriter(w)
+	}
+	return &cw
+}
+
+func (cw *compressWriter) Write(p []byte) (int, error) {
+	if cw.writer != nil {
+		return cw.writer.Write(p)
+	}
+	return cw.ResponseWriter.Write(p)
+}
+
+func (cw *compressWriter) Close() error {
+	if cw.writer != nil {
+		return cw.writer.Close()
+	}
+	return nil
+}
+
 // writeFeed sends a rendered feed, answering a conditional request with 304 when
 // the reader already has this exact document.
 func (s *Server) writeFeed(w http.ResponseWriter, r *http.Request, resp feedResponse, fromFeedCache bool) {
@@ -459,6 +511,21 @@ func (s *Server) writeFeed(w http.ResponseWriter, r *http.Request, resp feedResp
 		s.writeNotModified(w, resp, cacheControl)
 		return
 	}
+
+	// Check Accept-Encoding and wrap the response writer for compression.
+	ce := r.Header.Get("Accept-Encoding")
+	var cw *compressWriter
+	if strings.Contains(ce, "br") {
+		cw = newCompressWriter(w, "br")
+		w = cw
+	} else if strings.Contains(ce, "gzip") {
+		cw = newCompressWriter(w, "gzip")
+		w = cw
+	}
+	if cw != nil {
+		defer cw.Close()
+	}
+
 	w.Header().Set("Content-Type", resp.contentType)
 	w.Header().Set("Cache-Control", cacheControl)
 	w.Header().Set("ETag", resp.etag)
@@ -484,6 +551,10 @@ func (s *Server) writeFeed(w http.ResponseWriter, r *http.Request, resp feedResp
 		// A distinct header, because "the page came from the HTTP cache" and
 		// "the whole feed came from storage" mean very different things for load.
 		w.Header().Set("X-Feedme-Feedcache", "hit")
+	}
+	if cw != nil {
+		w.Header().Set("Content-Encoding", cw.encoding)
+		w.Header().Del("Content-Length")
 	}
 	w.WriteHeader(http.StatusOK)
 	if r.Method == http.MethodHead {

@@ -15,6 +15,7 @@ require (
 )
 
 require (
+	github.com/andybalholm/brotli v1.2.6 // indirect
 	github.com/andybalholm/cascadia v1.3.4 // indirect
 	github.com/antchfx/xpath v1.3.6 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect

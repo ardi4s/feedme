@@ -13,8 +13,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -202,9 +204,33 @@ func (p *Pipeline) Run(ctx context.Context, spec feedurl.Spec) (Result, error) {
 				doc, items, detection, err = p.collectItems(page, listOpts)
 			}
 			if err != nil {
-				return res, err
+				// If the page yielded no items, check if it has a feed link in its
+				// <head> (e.g., <link rel="alternate" type="application/rss+xml">).
+				// If so, fetch that feed and use it instead of failing.
+				if errors.Is(err, listpage.ErrNoItems) {
+					if feedURL := discoverFeedURL(page.Body, spec.URL); feedURL != "" {
+						feedPage, ferr := p.Fetch.Get(p.requestContext(ctx, spec, ""), feedURL, true)
+						if ferr == nil {
+							if fd, ok := feedFromPage(feedPage); ok {
+								items = fd.Items
+								feedTitle, feedLink = fd.Title, fd.Link
+								res.Detection = &listpage.Result{
+									Selector:   "feed",
+									Confidence: "high",
+									Reason:     "discovered via feed autodiscovery from the page",
+								}
+							}
+						}
+					}
+				}
+				if len(items) == 0 {
+					return res, err
+				}
 			}
-			res.Detection = detection
+			// Only set detection if not already set by auto-discovery.
+			if res.Detection == nil {
+				res.Detection = detection
+			}
 		}
 	}
 
@@ -386,6 +412,46 @@ func feedFromPage(page *fetch.Response) (*feedread.Document, bool) {
 		return nil, false
 	}
 	return doc, true
+}
+
+// discoverFeedURL searches the HTML body for a feed autodiscovery link
+// (<link rel="alternate" type="application/rss+xml" href="..."> or
+// type="application/atom+xml" or type="application/json").
+// Returns the absolute feed URL if found, empty string otherwise.
+func discoverFeedURL(body []byte, baseURL string) string {
+	doc, err := parseHTML(body)
+	if err != nil {
+		return ""
+	}
+	var feedURL string
+	domx.WalkElements(doc, func(n *html.Node) bool {
+		if n.Type != html.ElementNode || n.Data != "link" {
+			return true
+		}
+		rel := domx.Attr(n, "rel")
+		if rel == "" || !strings.Contains(rel, "alternate") {
+			return true
+		}
+		typ := domx.Attr(n, "type")
+		if typ != "application/rss+xml" && typ != "application/atom+xml" && typ != "application/json" {
+			return true
+		}
+		href := domx.Attr(n, "href")
+		if href == "" {
+			return true
+		}
+		u, err := url.Parse(href)
+		if err != nil {
+			return true
+		}
+		base, err := url.Parse(baseURL)
+		if err != nil {
+			return true
+		}
+		feedURL = base.ResolveReference(u).String()
+		return false // stop walking
+	})
+	return feedURL
 }
 
 // collectItems runs the configured selectors, or detects the list when the
