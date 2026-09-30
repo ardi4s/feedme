@@ -40,6 +40,12 @@ type BuiltFeed struct {
 	// LastError explains why the most recent build failed, empty when it
 	// succeeded.
 	LastError string
+
+	// Health fields (computed from build history)
+	FailureStreak int
+	TotalRecent   int
+	LastSuccess   time.Time
+	AvgBuildMs    int
 }
 
 // State is the one word the page shows for a feed: what it is right now.
@@ -54,6 +60,59 @@ func (f BuiltFeed) State() (label, class string) {
 	default:
 		return "not cached", "muted"
 	}
+}
+
+// HealthState returns a health label and CSS class for the feed.
+func (f BuiltFeed) HealthState() (label, class string) {
+	if f.TotalRecent == 0 {
+		return "unknown", "muted"
+	}
+	if f.FailureStreak > 0 {
+		return fmt.Sprintf("failing (%d/%d)", f.FailureStreak, f.TotalRecent), "err"
+	}
+	if f.LastSuccess.IsZero() {
+		return "never ok", "warn"
+	}
+	return fmt.Sprintf("healthy (%d/%d)", f.TotalRecent-f.FailureStreak, f.TotalRecent), "ok"
+}
+
+// AvgBuildTime returns a human-readable average build time.
+func (f BuiltFeed) AvgBuildTime() string {
+	if f.AvgBuildMs <= 0 {
+		return "—"
+	}
+	if f.AvgBuildMs < 1000 {
+		return fmt.Sprintf("%dms", f.AvgBuildMs)
+	}
+	return fmt.Sprintf("%.1fs", float64(f.AvgBuildMs)/1000)
+}
+
+// LastSuccessTime returns a human-readable last success time.
+func (f BuiltFeed) LastSuccessTime() string {
+	if f.LastSuccess.IsZero() {
+		return "never"
+	}
+	return agoTime(f.LastSuccess, time.Now())
+}
+
+// HealthStateTooltip returns a detailed tooltip for the health badge.
+func (f BuiltFeed) HealthStateTooltip() string {
+	if f.TotalRecent == 0 {
+		return "No build history available"
+	}
+	var parts []string
+	if f.FailureStreak > 0 {
+		parts = append(parts, fmt.Sprintf("%d consecutive failures", f.FailureStreak))
+	} else if f.LastSuccess.IsZero() {
+		parts = append(parts, "Never succeeded")
+	} else {
+		parts = append(parts, fmt.Sprintf("Last success %s", agoTime(f.LastSuccess, time.Now())))
+	}
+	if f.AvgBuildMs > 0 {
+		parts = append(parts, fmt.Sprintf("avg build %s", f.AvgBuildTime()))
+	}
+	parts = append(parts, fmt.Sprintf("%d/%d recent builds ok", f.TotalRecent-f.FailureStreak, f.TotalRecent))
+	return strings.Join(parts, "; ")
 }
 
 // FeedAdmin persists what the management page shows and changes.
@@ -214,15 +273,19 @@ type sortSpec struct {
 // The orderable columns. Source is the default because the page groups by it,
 // so an unsorted view still reads top to bottom.
 const (
-	sortSource = "source"
-	sortFeed   = "feed"
-	sortItems  = "items"
-	sortBuilt  = "built"
-	sortState  = "state"
+	sortSource   = "source"
+	sortFeed     = "feed"
+	sortItems    = "items"
+	sortBuilt    = "built"
+	sortState    = "state"
+	sortHealth   = "health"
+	sortStreak   = "streak"
+	sortAvgBuild = "avgbuild"
+	sortLastOK   = "lastok"
 )
 
 func defaultSortDir(key string) string {
-	if key == sortBuilt || key == sortItems {
+	if key == sortBuilt || key == sortItems || key == sortStreak || key == sortAvgBuild {
 		return "desc"
 	}
 	return "asc"
@@ -232,7 +295,8 @@ func parseSort(r *http.Request) sortSpec {
 	q := r.URL.Query()
 	key := q.Get("sort")
 	switch key {
-	case sortSource, sortFeed, sortItems, sortBuilt, sortState:
+	case sortSource, sortFeed, sortItems, sortBuilt, sortState,
+		sortHealth, sortStreak, sortAvgBuild, sortLastOK:
 	default:
 		key = sortSource
 	}
@@ -367,9 +431,43 @@ func cmpFeedKey(a, b BuiltFeed, key string) int {
 		return 0
 	case sortState:
 		return cmpInt(stateRank(a), stateRank(b))
+	case sortHealth:
+		return cmpInt(healthRank(a), healthRank(b))
+	case sortStreak:
+		return cmpInt(a.FailureStreak, b.FailureStreak)
+	case sortAvgBuild:
+		return cmpInt(a.AvgBuildMs, b.AvgBuildMs)
+	case sortLastOK:
+		switch {
+		case a.LastSuccess.IsZero() && b.LastSuccess.IsZero():
+			return 0
+		case a.LastSuccess.IsZero():
+			return 1
+		case b.LastSuccess.IsZero():
+			return -1
+		case a.LastSuccess.Before(b.LastSuccess):
+			return 1
+		case a.LastSuccess.After(b.LastSuccess):
+			return -1
+		}
+		return 0
 	default:
 		return strings.Compare(siteOf(a.SourceURL), siteOf(b.SourceURL))
 	}
+}
+
+// healthRank orders health by severity: failing > never ok > healthy > unknown
+func healthRank(f BuiltFeed) int {
+	if f.TotalRecent == 0 {
+		return 3 // unknown
+	}
+	if f.FailureStreak > 0 {
+		return 0 // failing
+	}
+	if f.LastSuccess.IsZero() {
+		return 1 // never ok
+	}
+	return 2 // healthy
 }
 
 func cmpInt(a, b int) int {
@@ -446,7 +544,9 @@ func (s *Server) renderFeeds(w http.ResponseWriter, r *http.Request) {
 
 const feedsColgroup = `<colgroup>` +
 	`<col class="check"><col class="source"><col class="feed">` +
-	`<col class="items"><col class="built"><col class="state"><col class="action">` +
+	`<col class="items"><col class="built"><col class="state">` +
+	`<col class="health"><col class="streak"><col class="avgbuild"><col class="lastok">` +
+	`<col class="action">` +
 	`</colgroup>`
 
 // feedsToolbar carries the bulk form. It sits outside the table so the row
@@ -477,6 +577,10 @@ func writeFeedsHead(b *strings.Builder, spec sortSpec) {
 	writeSortHeader(b, sortItems, "Item", "items", spec)
 	writeSortHeader(b, sortBuilt, "Built", "built", spec)
 	writeSortHeader(b, sortState, "State", "state", spec)
+	writeSortHeader(b, sortHealth, "Health", "health", spec)
+	writeSortHeader(b, sortStreak, "Streak", "streak", spec)
+	writeSortHeader(b, sortAvgBuild, "Avg build", "avgbuild", spec)
+	writeSortHeader(b, sortLastOK, "Last OK", "lastok", spec)
 	b.WriteString(`<th class="action">Action</th>`)
 	b.WriteString(`</tr></thead>`)
 }
@@ -539,6 +643,13 @@ func writeFeedRow(b *strings.Builder, group string, f BuiltFeed, now time.Time) 
 	label, class := f.State()
 	fmt.Fprintf(b, `<td class="state"><span class="badge %s">%s</span></td>`,
 		class, html.EscapeString(label))
+	// Health columns
+	healthLabel, healthClass := f.HealthState()
+	fmt.Fprintf(b, `<td class="health"><span class="badge %s" title="%s">%s</span></td>`,
+		healthClass, html.EscapeString(f.HealthStateTooltip()), html.EscapeString(healthLabel))
+	fmt.Fprintf(b, `<td class="streak">%d/%d</td>`, f.FailureStreak, f.TotalRecent)
+	fmt.Fprintf(b, `<td class="avgbuild">%s</td>`, html.EscapeString(f.AvgBuildTime()))
+	fmt.Fprintf(b, `<td class="lastok">%s</td>`, html.EscapeString(f.LastSuccessTime()))
 	writeRowActions(b, f.Key)
 	b.WriteString(`</tr>`)
 }
