@@ -310,19 +310,16 @@ type sortSpec struct {
 // The orderable columns. Source is the default because the page groups by it,
 // so an unsorted view still reads top to bottom.
 const (
-	sortSource   = "source"
-	sortFeed     = "feed"
-	sortItems    = "items"
-	sortBuilt    = "built"
-	sortState    = "state"
-	sortHealth   = "health"
-	sortStreak   = "streak"
-	sortAvgBuild = "avgbuild"
-	sortLastOK   = "lastok"
+	sortSource = "source"
+	sortFeed   = "feed"
+	sortItems  = "items"
+	sortBuilt  = "built"
+	sortState  = "state"
+	sortStatus = "status"
 )
 
 func defaultSortDir(key string) string {
-	if key == sortBuilt || key == sortItems || key == sortStreak || key == sortAvgBuild {
+	if key == sortBuilt || key == sortItems {
 		return "desc"
 	}
 	return "asc"
@@ -332,8 +329,7 @@ func parseSort(r *http.Request) sortSpec {
 	q := r.URL.Query()
 	key := q.Get("sort")
 	switch key {
-	case sortSource, sortFeed, sortItems, sortBuilt, sortState,
-		sortHealth, sortStreak, sortAvgBuild, sortLastOK:
+	case sortSource, sortFeed, sortItems, sortBuilt, sortState, sortStatus:
 	default:
 		key = sortSource
 	}
@@ -468,43 +464,9 @@ func cmpFeedKey(a, b BuiltFeed, key string) int {
 		return 0
 	case sortState:
 		return cmpInt(stateRank(a), stateRank(b))
-	case sortHealth:
-		return cmpInt(healthRank(a), healthRank(b))
-	case sortStreak:
-		return cmpInt(a.FailureStreak, b.FailureStreak)
-	case sortAvgBuild:
-		return cmpInt(a.AvgBuildMs, b.AvgBuildMs)
-	case sortLastOK:
-		switch {
-		case a.LastSuccess.IsZero() && b.LastSuccess.IsZero():
-			return 0
-		case a.LastSuccess.IsZero():
-			return 1
-		case b.LastSuccess.IsZero():
-			return -1
-		case a.LastSuccess.Before(b.LastSuccess):
-			return 1
-		case a.LastSuccess.After(b.LastSuccess):
-			return -1
-		}
-		return 0
 	default:
 		return strings.Compare(siteOf(a.SourceURL), siteOf(b.SourceURL))
 	}
-}
-
-// healthRank orders health by severity: failing > never ok > healthy > unknown
-func healthRank(f BuiltFeed) int {
-	if f.TotalRecent == 0 {
-		return 3 // unknown
-	}
-	if f.FailureStreak > 0 {
-		return 0 // failing
-	}
-	if f.LastSuccess.IsZero() {
-		return 1 // never ok
-	}
-	return 2 // healthy
 }
 
 func cmpInt(a, b int) int {
@@ -616,7 +578,7 @@ func writeFeedsHead(b *strings.Builder, spec sortSpec) {
 	writeSortHeader(b, sortFeed, "Feed", "", spec)
 	writeSortHeader(b, sortItems, "Item", "items", spec)
 	writeSortHeader(b, sortBuilt, "Built", "built", spec)
-	b.WriteString(`<th class="status">Status</th>`)
+	writeSortHeader(b, sortStatus, "Status", "status", spec)
 	b.WriteString(`<th class="action">Action</th>`)
 	b.WriteString(`</tr></thead>`)
 }
