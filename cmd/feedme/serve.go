@@ -14,6 +14,7 @@ import (
 
 	"feedme/internal/config"
 	"feedme/internal/fetch"
+	"feedme/internal/gnews"
 	"feedme/internal/pipeline"
 	"feedme/internal/render"
 	"feedme/internal/store"
@@ -117,15 +118,23 @@ func runServe(args []string) error {
 		return fmt.Errorf("load site configs: %w", err)
 	}
 
+	robots := cfg.RespectRobots == nil || *cfg.RespectRobots
+
 	client := fetch.New(fetch.Options{
 		UserAgent:      cfg.UserAgent,
 		Timeout:        cfg.Timeout,
 		MaxBodyBytes:   cfg.MaxBodyBytes,
 		GlobalParallel: cfg.GlobalConcurrency,
 		PerHostGap:     cfg.PerHostInterval,
-		RespectRobots:  cfg.RespectRobots == nil || *cfg.RespectRobots,
+		RespectRobots:  robots,
 		AllowPrivate:   cfg.AllowPrivate,
 		CacheTTL:       cfg.CacheTTL,
+		// A site config may opt one host out of the check, which is the only
+		// way to read a feed whose publisher forbids automated clients from
+		// that very path. Every other host keeps the global decision.
+		RobotsFor: func(host string) bool {
+			return sites.RobotsFor(host, robots)
+		},
 		CacheGet: func(ctx context.Context, u string) (*fetch.Response, bool) {
 			c, err := st.CacheGet(ctx, u)
 			if err != nil || c == nil {
@@ -150,6 +159,11 @@ func runServe(args []string) error {
 		Fetch:    client,
 		Sites:    siteLookup{sites: sites},
 		Parallel: intOr(*parallel, 4),
+		// Google News and Google Alerts publish links that have to be opened
+		// before the publisher's page can be read. Opening them costs a request
+		// per item, so it happens only for full text, which is the only stage
+		// that needs the publisher's URL at all.
+		Links: gnews.NewResolver(client, logger),
 	}
 	if cfg.RenderURL != "" {
 		// The browser is a separate service. Configuring one is what turns
@@ -164,6 +178,7 @@ func runServe(args []string) error {
 		Recorder:    storeRecorder{st: st},
 		Admin:       storeAdmin{st: st},
 		ManageToken: manageToken,
+		Metrics:     web.NewMetrics(),
 	})
 
 	srv := &http.Server{
@@ -213,7 +228,7 @@ func runServe(args []string) error {
 			"addr", *addr,
 			"db", cfg.DBPath,
 			"sites", sites.Count(),
-			"robots", cfg.RespectRobots == nil || *cfg.RespectRobots,
+			"robots", robots,
 			"manage_auth", manageToken != "",
 			"user_agent", cfg.UserAgent)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

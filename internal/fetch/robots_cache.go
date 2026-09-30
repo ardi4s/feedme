@@ -42,8 +42,10 @@ func robotsOrigin(u *url.URL) string {
 	if scheme == "" {
 		scheme = "http"
 	}
-	host := u.Hostname()
-	return scheme + "://" + host + "/robots.txt"
+	// u.Host, not u.Hostname: dropping the port would send the request to the
+	// wrong server, and the rules of the wrong server are the ones that would
+	// then be applied to this host.
+	return scheme + "://" + u.Host + "/robots.txt"
 }
 
 // Allowed reports whether u may be fetched, loading robots.txt if needed.
@@ -58,8 +60,12 @@ func (rc *RobotsCache) Allowed(ctx context.Context, u *url.URL) (bool, error) {
 }
 
 // Get returns the parsed robots.txt for a URL's host, loading it if stale.
+//
+// The cache is keyed on the host with its port, because that is what the
+// request for robots.txt actually goes to: two services on one machine publish
+// different rules, and each has to be judged by its own.
 func (rc *RobotsCache) Get(ctx context.Context, u *url.URL) (*Robots, error) {
-	host := u.Hostname()
+	host := u.Host
 	rc.mu.RLock()
 	entry, ok := rc.byHost[host]
 	rc.mu.RUnlock()

@@ -291,6 +291,16 @@ type FeedBuildSummary struct {
 	Error string
 	// BuiltAt is when that build ran.
 	BuiltAt time.Time
+
+	// Health fields (computed from build history)
+	// FailureStreak is consecutive failed builds at the end of history.
+	FailureStreak int
+	// TotalRecent is number of recent builds checked for streak (max 50).
+	TotalRecent int
+	// LastSuccess is when the feed last built successfully, zero if never.
+	LastSuccess time.Time
+	// AvgBuildMs is average build duration in milliseconds over recent builds.
+	AvgBuildMs int
 }
 
 // FeedBuildSummary returns the most recent build of every feed, newest first.
@@ -333,7 +343,27 @@ func (s *Store) FeedBuildSummary(ctx context.Context, limit int) ([]FeedBuildSum
 		b.BuiltAt = timeFromNull(sql.NullInt64{Int64: built, Valid: built > 0})
 		out = append(out, b)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Enrich with health data
+	for i := range out {
+		streak, total, lastSucc, avgMs, err := s.FeedHealth(ctx, out[i].Key)
+		if err != nil {
+			// Ignore health errors, don't fail the whole request
+			out[i].FailureStreak = 0
+			out[i].TotalRecent = 0
+			out[i].LastSuccess = time.Time{}
+			out[i].AvgBuildMs = 0
+		} else {
+			out[i].FailureStreak = streak
+			out[i].TotalRecent = total
+			out[i].LastSuccess = lastSucc
+			out[i].AvgBuildMs = avgMs
+		}
+	}
+	return out, nil
 }
 
 // FeedBuildsDelete removes a feed's build history.
@@ -369,4 +399,79 @@ func (s *Store) FeedBuildsPrune(ctx context.Context, keep int) (int64, error) {
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// FeedHealth computes health metrics for a feed from its build history.
+// It examines up to 50 most recent builds.
+func (s *Store) FeedHealth(ctx context.Context, feedKey string) (failureStreak int, totalRecent int, lastSuccess time.Time, avgBuildMs int, err error) {
+	const maxRecent = 50
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT ok, built_at FROM feed_builds
+		 WHERE feed_key = ?
+		 ORDER BY built_at DESC, id DESC
+		 LIMIT ?`, feedKey, maxRecent)
+	if err != nil {
+		return 0, 0, time.Time{}, 0, err
+	}
+	defer rows.Close()
+
+	streak := 0
+	totalRecentCount := 0
+	inStreak := true
+
+	for rows.Next() {
+		var ok int
+		var built int64
+		if err := rows.Scan(&ok, &built); err != nil {
+			return 0, 0, time.Time{}, 0, err
+		}
+		totalRecentCount++
+		if ok != 0 {
+			if inStreak {
+				inStreak = false
+			}
+			if lastSuccess.IsZero() {
+				lastSuccess = time.Unix(built, 0)
+			}
+		} else if inStreak {
+			streak++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, time.Time{}, 0, err
+	}
+
+	var avgMs int
+
+	// We need a second query to get build durations
+	drows, err := s.db.QueryContext(ctx,
+		`SELECT built_at FROM feed_builds
+		 WHERE feed_key = ? AND ok = 1
+		 ORDER BY built_at DESC, id DESC
+		 LIMIT ?`, feedKey, maxRecent)
+	if err == nil {
+		var durations []int64
+		var prev time.Time
+		for drows.Next() {
+			var built int64
+			if err := drows.Scan(&built); err != nil {
+				break
+			}
+			t := time.Unix(built, 0)
+			if !prev.IsZero() {
+				durations = append(durations, prev.Sub(t).Milliseconds())
+			}
+			prev = t
+		}
+		drows.Close()
+		if len(durations) > 0 {
+			var sum int64
+			for _, d := range durations {
+				sum += d
+			}
+			avgMs = int(sum / int64(len(durations)))
+		}
+	}
+
+	return streak, totalRecentCount, lastSuccess, avgMs, nil
 }

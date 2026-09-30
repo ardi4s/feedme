@@ -189,3 +189,40 @@ func TestLoadSitesReadsForceHostAndCrossHost(t *testing.T) {
 		t.Error("CrossHost should default to false")
 	}
 }
+
+// The robots decision is the one per-host setting that is not about extraction,
+// so it is worth pinning on its own: a config that says nothing must never be
+// read as permission, and an opt-out must not reach a host it did not name.
+func TestRobotsFor(t *testing.T) {
+	dir := t.TempDir()
+	writeSiteFile(t, dir, "news.google.com.yaml", "host: news.google.com\nrespect_robots: false\n")
+	writeSiteFile(t, dir, "www.google.com.yaml", "host: www.google.com\nrespect_robots: false\n")
+	// Says nothing about robots, only about extraction.
+	writeSiteFile(t, dir, "kompas.com.yaml", "host: kompas.com\nbody: ['.article']\n")
+	writeSiteFile(t, dir, "example.com.yaml", "host: example.com\nrespect_robots: true\n")
+
+	s, err := LoadSites(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		host   string
+		global bool
+		want   bool
+		why    string
+	}{
+		{host: "news.google.com", global: true, want: false, why: "the config opts the host out"},
+		{host: "www.google.com", global: true, want: false, why: "the config opts the host out"},
+		{host: "kompas.com", global: true, want: true, why: "a config that is silent keeps the global setting"},
+		{host: "kompas.com", global: false, want: false, why: "and keeps it whichever way it points"},
+		{host: "bbc.com", global: true, want: true, why: "a host nobody configured keeps the global setting"},
+		{host: "bbc.com", global: false, want: false, why: "including when the check is off everywhere"},
+		{host: "example.com", global: false, want: true, why: "a config can also opt a host back in"},
+	}
+	for _, tc := range cases {
+		if got := s.RobotsFor(tc.host, tc.global); got != tc.want {
+			t.Errorf("RobotsFor(%q, %v) = %v, want %v: %s", tc.host, tc.global, got, tc.want, tc.why)
+		}
+	}
+}

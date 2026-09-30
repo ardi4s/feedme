@@ -24,8 +24,10 @@ import (
 // script sends and what the command line documents.
 
 const (
-	feedsPath = "/feeds"
-	loginPath = "/login"
+	feedsPath  = "/feeds"
+	opmlPath   = "/feeds/opml"
+	exportPath = "/feeds/export"
+	loginPath  = "/login"
 
 	// sessionCookieName is the cookie the sign-in form sets.
 	sessionCookieName = "feedme_session"

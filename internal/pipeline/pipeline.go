@@ -13,8 +13,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +31,7 @@ import (
 	"feedme/internal/fetch"
 	"feedme/internal/filter"
 	"feedme/internal/listpage"
+	"feedme/internal/redirect"
 	"feedme/internal/render"
 	"feedme/internal/urlx"
 )
@@ -57,6 +60,23 @@ type Pipeline struct {
 	// common case never pays for a browser. Nil means rendering is unavailable,
 	// and a render_js request then fails with a clear message.
 	Renderer render.Renderer
+	// Links opens the click-through links an aggregator puts in its feed, so
+	// that the article body comes from the publisher. It is nil when no such
+	// links are in play, which is the ordinary case: a link is then used exactly
+	// as the feed published it.
+	Links LinkResolver
+}
+
+// LinkResolver opens a click-through item link — the wrapper URL an aggregator
+// publishes so that a reader's click can be counted.
+//
+// It answers three things separately because a caller treats them differently.
+// A link it does not recognise is used as it stands. A link it recognises but
+// cannot open is a failure worth counting, not a link worth following: following
+// it would only arrive back at the same wrapper, and an item with a teaser is
+// better than an item whose body is a redirect notice.
+type LinkResolver interface {
+	Resolve(ctx context.Context, link string) (target string, recognized bool, err error)
 }
 
 // SiteLookup resolves per-host configuration.
@@ -146,32 +166,72 @@ func (p *Pipeline) Run(ctx context.Context, spec feedurl.Spec) (Result, error) {
 			res.FetchedAt = now
 		}
 
-		listOpts := spec.List
-		// A site config fills in whatever the request left unset, which is what
-		// makes a known site work with the shortest possible feed URL.
-		if site := p.siteFor(spec.URL); site != nil {
-			listOpts = applySite(listOpts, site)
-		}
-
-		doc, items, detection, err = p.collectItems(page, listOpts)
-		if err != nil && spec.RenderJS {
-			// Hybrid by design: the plain fetch is tried first and the browser is
-			// only paid for when it is actually needed. A JS-heavy listing returns
-			// a 200 shell that yields no items, which is exactly this case.
-			rendered, rerr := p.renderPage(ctx, spec.URL)
-			if rerr != nil {
-				return res, rerr
+		// A URL that is already a feed states its own items, and reading it as a
+		// listing page would find none: there is no article element and no main,
+		// because there is no HTML. The document is checked before any selector
+		// work rather than after it failing, which is also what keeps this free —
+		// the body has already been fetched, so a feed costs no request that a
+		// listing page does not.
+		if fd, ok := feedFromPage(page); ok {
+			items = fd.Items
+			feedTitle, feedLink = fd.Title, fd.Link
+			res.Detection = &listpage.Result{
+				Selector:   "feed",
+				Confidence: "high",
+				Reason:     "the document is a feed, so its entries are the items",
 			}
-			page = rendered
-			res.PageStatus = rendered.Status
-			res.FromCache = false
-			res.FetchedAt = rendered.FetchedAt
+		} else {
+			listOpts := spec.List
+			// A site config fills in whatever the request left unset, which is what
+			// makes a known site work with the shortest possible feed URL.
+			if site := p.siteFor(spec.URL); site != nil {
+				listOpts = applySite(listOpts, site)
+			}
+
 			doc, items, detection, err = p.collectItems(page, listOpts)
+			if err != nil && spec.RenderJS {
+				// Hybrid by design: the plain fetch is tried first and the browser is
+				// only paid for when it is actually needed. A JS-heavy listing returns
+				// a 200 shell that yields no items, which is exactly this case.
+				rendered, rerr := p.renderPage(ctx, spec.URL)
+				if rerr != nil {
+					return res, rerr
+				}
+				page = rendered
+				res.PageStatus = rendered.Status
+				res.FromCache = false
+				res.FetchedAt = rendered.FetchedAt
+				doc, items, detection, err = p.collectItems(page, listOpts)
+			}
+			if err != nil {
+				// If the page yielded no items, check if it has a feed link in its
+				// <head> (e.g., <link rel="alternate" type="application/rss+xml">).
+				// If so, fetch that feed and use it instead of failing.
+				if errors.Is(err, listpage.ErrNoItems) {
+					if feedURL := discoverFeedURL(page.Body, spec.URL); feedURL != "" {
+						feedPage, ferr := p.Fetch.Get(p.requestContext(ctx, spec, ""), feedURL, true)
+						if ferr == nil {
+							if fd, ok := feedFromPage(feedPage); ok {
+								items = fd.Items
+								feedTitle, feedLink = fd.Title, fd.Link
+								res.Detection = &listpage.Result{
+									Selector:   "feed",
+									Confidence: "high",
+									Reason:     "discovered via feed autodiscovery from the page",
+								}
+							}
+						}
+					}
+				}
+				if len(items) == 0 {
+					return res, err
+				}
+			}
+			// Only set detection if not already set by auto-discovery.
+			if res.Detection == nil {
+				res.Detection = detection
+			}
 		}
-		if err != nil {
-			return res, err
-		}
-		res.Detection = detection
 	}
 
 	if len(spec.Feeds) > 0 {
@@ -184,6 +244,14 @@ func (p *Pipeline) Run(ctx context.Context, spec feedurl.Spec) (Result, error) {
 		feedTitle, feedLink = source.Title, source.Link
 		items = append(items, merged...)
 	}
+
+	// Click-through links that name their destination in their own query string
+	// are opened here, before deduplication and filtering, so that both see the
+	// link the reader will actually land on. The wrappers that need a request to
+	// be understood are deliberately not opened: a Google News link already works
+	// for a reader, and spending a request per item to replace it with an
+	// equivalent link is not a trade worth making.
+	items = openItemLinks(items)
 
 	items = dedupeItems(items)
 
@@ -284,6 +352,22 @@ func (p *Pipeline) collectFeeds(ctx context.Context, spec feedurl.Spec) ([]listp
 	return items, source, fetched, failed, nil
 }
 
+// openItemLinks replaces the click-through links that carry their destination in
+// their own query string, so the item is published with a direct link to the
+// publisher.
+//
+// A link that cannot be opened is left exactly as the feed published it. The
+// reader can follow a wrapper perfectly well, and a link that reaches the
+// publisher by a different route is no worse than one that does not.
+func openItemLinks(items []listpage.Item) []listpage.Item {
+	for i := range items {
+		if target, ok := redirect.Unwrap(items[i].Link); ok {
+			items[i].Link = target
+		}
+	}
+	return items
+}
+
 // dedupeItems drops repeated links, which is common when two feeds carry the
 // same syndicated story. The first occurrence wins, so the source order in the
 // URL decides which copy is kept.
@@ -302,6 +386,72 @@ func dedupeItems(items []listpage.Item) []listpage.Item {
 		out = append(out, it)
 	}
 	return out
+}
+
+// feedFromPage reports whether a fetched body is a feed document rather than a
+// page, and returns it when it is.
+//
+// A feed URL is a legitimate thing to paste into the url field, and it is
+// wherever anyone gets one from: a reader's "copy feed address", a site footer,
+// a search result. Requiring the reader to know that such a URL belongs in
+// feeds[] instead is a distinction the code can make and the person typing cannot
+// see. So the body is asked what it is, rather than the request being taken at
+// its word.
+//
+// The test is the parse itself. feedread only accepts an RSS, Atom, RDF or JSON
+// Feed root, so an HTML page fails here and goes on to the selector path exactly
+// as before — no content type is consulted, because publishers get that wrong in
+// both directions and the body is the authority.
+//
+// A feed with no entries reports false, so it falls through to the listing path
+// and fails there as an empty page. It is a rare shape, and the alternative is a
+// second error message for a case with an accurate one already.
+func feedFromPage(page *fetch.Response) (*feedread.Document, bool) {
+	doc, err := feedread.Parse(page.Body, page.URL)
+	if err != nil || len(doc.Items) == 0 {
+		return nil, false
+	}
+	return doc, true
+}
+
+// discoverFeedURL searches the HTML body for a feed autodiscovery link
+// (<link rel="alternate" type="application/rss+xml" href="..."> or
+// type="application/atom+xml" or type="application/json").
+// Returns the absolute feed URL if found, empty string otherwise.
+func discoverFeedURL(body []byte, baseURL string) string {
+	doc, err := parseHTML(body)
+	if err != nil {
+		return ""
+	}
+	var feedURL string
+	domx.WalkElements(doc, func(n *html.Node) bool {
+		if n.Type != html.ElementNode || n.Data != "link" {
+			return true
+		}
+		rel := domx.Attr(n, "rel")
+		if rel == "" || !strings.Contains(rel, "alternate") {
+			return true
+		}
+		typ := domx.Attr(n, "type")
+		if typ != "application/rss+xml" && typ != "application/atom+xml" && typ != "application/json" {
+			return true
+		}
+		href := domx.Attr(n, "href")
+		if href == "" {
+			return true
+		}
+		u, err := url.Parse(href)
+		if err != nil {
+			return true
+		}
+		base, err := url.Parse(baseURL)
+		if err != nil {
+			return true
+		}
+		feedURL = base.ResolveReference(u).String()
+		return false // stop walking
+	})
+	return feedURL
 }
 
 // collectItems runs the configured selectors, or detects the list when the
@@ -470,12 +620,30 @@ func dropBoilerplateBodies(content map[string]string) (map[string]string, int) {
 // fetchBody retrieves and extracts one article. The body is always read fresh:
 // a full-text feed is rebuilt rarely, and a cached body would mean publishing an
 // article the site has since corrected or withdrawn.
+//
+// The link is opened first when it is a click-through, so the body comes from
+// the publisher. The item's own link is not changed: the resolver's answer is
+// good enough to fetch an article with and is not good enough to publish, and a
+// Google News link is a working link that a reader can follow as it stands.
 func (p *Pipeline) fetchBody(ctx context.Context, link string, spec feedurl.Spec) (string, bool) {
-	r, err := p.Fetch.Get(p.requestContext(ctx, spec, spec.URL), link, true)
+	target := link
+	if p.Links != nil {
+		resolved, recognized, err := p.Links.Resolve(ctx, link)
+		if recognized {
+			if err != nil {
+				// The wrapper was understood but could not be opened. Fetching
+				// it anyway would return the wrapper's own page, so the item
+				// keeps its teaser and the count of failures stays honest.
+				return "", false
+			}
+			target = resolved
+		}
+	}
+	r, err := p.Fetch.Get(p.requestContext(ctx, spec, spec.URL), target, true)
 	if err != nil || r.Status < 200 || r.Status >= 300 {
 		return "", false
 	}
-	article, err := extractArticle(r.Body, link, spec.HTMLCleanup)
+	article, err := extractArticle(r.Body, target, spec.HTMLCleanup)
 	if err != nil || strings.TrimSpace(article.ContentHTML) == "" {
 		return "", false
 	}

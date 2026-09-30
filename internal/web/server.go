@@ -8,16 +8,21 @@
 package web
 
 import (
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/andybalholm/brotli"
 
 	"feedme/internal/feed"
 	"feedme/internal/feedurl"
@@ -49,6 +54,8 @@ type Options struct {
 	// leaves the page open, which is what a single-user instance on localhost
 	// wants.
 	ManageToken string
+	// Metrics enables Prometheus metrics at /metrics. Nil disables it.
+	Metrics *Metrics
 }
 
 // CachedFeed is a rendered feed kept between requests.
@@ -111,6 +118,7 @@ type Server struct {
 	recorder    BuildRecorder
 	admin       FeedAdmin
 	manageToken string
+	metrics     *Metrics
 }
 
 // New builds a Server.
@@ -127,6 +135,7 @@ func New(o Options) *Server {
 		recorder:    o.Recorder,
 		admin:       o.Admin,
 		manageToken: o.ManageToken,
+		metrics:     o.Metrics,
 	}
 	if s.log == nil {
 		s.log = slog.New(discardHandler{})
@@ -159,9 +168,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleCheck(w, r)
 	case "/preview":
 		s.handlePreview(w, r)
-	case feedsPath:
+	case feedsPath, opmlPath, exportPath:
 		if s.authorizeManage(w, r) {
-			s.handleFeeds(w, r)
+			if path == exportPath {
+				s.handleFeedsExport(w, r)
+			} else if path == opmlPath {
+				// Backwards compatibility: /feeds/opml redirects to /feeds/export?format=opml
+				http.Redirect(w, r, exportPath+"?format=opml", http.StatusMovedPermanently)
+			} else {
+				s.handleFeeds(w, r)
+			}
 		}
 	case loginPath:
 		s.handleLogin(w, r)
@@ -175,6 +191,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeAsset(w, r, faviconPNG, "image/png")
 	case "/favicon.ico":
 		writeAsset(w, r, faviconICO, "image/x-icon")
+	case "/metrics":
+		if s.metrics != nil {
+			s.metrics.MetricsHandler().ServeHTTP(w, r)
+		} else {
+			http.Error(w, "not found", http.StatusNotFound)
+		}
 	case "/":
 		s.handleIndex(w, r)
 	default:
@@ -237,11 +259,31 @@ func (s *Server) handleExtract(w http.ResponseWriter, r *http.Request) {
 	spec.Feed.SelfLink = key
 	spec.Feed.SelfType = contentTypeOf(spec.Format)
 
+	start := time.Now()
 	resp, fromFeedCache, err := s.buildFeed(r.Context(), key, spec, truthyParam(r, "refresh"), true)
+	buildDuration := time.Since(start)
+
+	if s.metrics != nil {
+		s.metrics.RecordBuildDuration(string(spec.Format), buildDuration)
+	}
+
 	if err != nil {
+		if s.metrics != nil {
+			s.metrics.RecordFeedFailed(errorTypeFromError(err))
+		}
 		s.writeRunError(w, r, err)
 		return
 	}
+
+	if s.metrics != nil {
+		s.metrics.RecordFeedBuilt(string(spec.Format), detectionString(resp.result))
+		s.metrics.RecordItemsExtracted(hostFromURL(spec.URL), len(resp.items))
+		if spec.FullText {
+			s.metrics.RecordFulltextFetched(hostFromURL(spec.URL), resp.result.FullTextFetched)
+			s.metrics.RecordFulltextFailed(hostFromURL(spec.URL), resp.result.FullTextFailed)
+		}
+	}
+
 	s.writeFeed(w, r, resp, fromFeedCache)
 }
 
@@ -364,14 +406,25 @@ func detectionOf(res *pipeline.Result) *listpage.Result {
 // responseFromCache converts a stored feed back into a response. There is no run
 // behind it, so the full-text, detection and page-cache headers are left off
 // rather than guessed at: nothing was fetched, so claiming a page cache hit would
-// misdescribe what happened.
+// misdescribe what happened. However, the detector and confidence are stored
+// in the cache, so we reconstruct a minimal result for the headers.
 func responseFromCache(c *CachedFeed) feedResponse {
+	var res *pipeline.Result
+	if c.Detector != "" {
+		res = &pipeline.Result{
+			Detection: &listpage.Result{
+				Selector:   c.Detector,
+				Confidence: c.Confidence,
+			},
+		}
+	}
 	return feedResponse{
 		body:         c.Body,
 		etag:         c.ETag,
 		contentType:  c.ContentType,
 		itemCount:    c.ItemCount,
 		lastModified: c.FetchedAt,
+		result:       res,
 	}
 }
 
@@ -404,6 +457,40 @@ func confidenceOf(det *listpage.Result) string {
 	return det.Confidence
 }
 
+// compressWriter wraps an http.ResponseWriter to provide transparent compression.
+type compressWriter struct {
+	http.ResponseWriter
+	writer   io.WriteCloser
+	encoding string
+}
+
+func newCompressWriter(w http.ResponseWriter, encoding string) *compressWriter {
+	var cw compressWriter
+	cw.ResponseWriter = w
+	cw.encoding = encoding
+	switch encoding {
+	case "br":
+		cw.writer = brotli.NewWriterLevel(w, brotli.BestSpeed)
+	case "gzip":
+		cw.writer = gzip.NewWriter(w)
+	}
+	return &cw
+}
+
+func (cw *compressWriter) Write(p []byte) (int, error) {
+	if cw.writer != nil {
+		return cw.writer.Write(p)
+	}
+	return cw.ResponseWriter.Write(p)
+}
+
+func (cw *compressWriter) Close() error {
+	if cw.writer != nil {
+		return cw.writer.Close()
+	}
+	return nil
+}
+
 // writeFeed sends a rendered feed, answering a conditional request with 304 when
 // the reader already has this exact document.
 func (s *Server) writeFeed(w http.ResponseWriter, r *http.Request, resp feedResponse, fromFeedCache bool) {
@@ -424,6 +511,21 @@ func (s *Server) writeFeed(w http.ResponseWriter, r *http.Request, resp feedResp
 		s.writeNotModified(w, resp, cacheControl)
 		return
 	}
+
+	// Check Accept-Encoding and wrap the response writer for compression.
+	ce := r.Header.Get("Accept-Encoding")
+	var cw *compressWriter
+	if strings.Contains(ce, "br") {
+		cw = newCompressWriter(w, "br")
+		w = cw
+	} else if strings.Contains(ce, "gzip") {
+		cw = newCompressWriter(w, "gzip")
+		w = cw
+	}
+	if cw != nil {
+		defer cw.Close()
+	}
+
 	w.Header().Set("Content-Type", resp.contentType)
 	w.Header().Set("Cache-Control", cacheControl)
 	w.Header().Set("ETag", resp.etag)
@@ -449,6 +551,10 @@ func (s *Server) writeFeed(w http.ResponseWriter, r *http.Request, resp feedResp
 		// A distinct header, because "the page came from the HTTP cache" and
 		// "the whole feed came from storage" mean very different things for load.
 		w.Header().Set("X-Feedme-Feedcache", "hit")
+	}
+	if cw != nil {
+		w.Header().Set("Content-Encoding", cw.encoding)
+		w.Header().Del("Content-Length")
 	}
 	w.WriteHeader(http.StatusOK)
 	if r.Method == http.MethodHead {
@@ -616,7 +722,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, indexPage())
+	fmt.Fprint(w, indexPage(r.URL.Query()))
 }
 
 // fail writes a plain-text error with a status code, which is what a script
@@ -896,9 +1002,9 @@ feed URL, so a feed is a URL you can edit, share, and keep.</p>
   <summary>Source</summary>
   <div class="group-body">
    <div class="field">
-    <label for="url">Listing page URL</label>
+    <label for="url">Listing page or feed URL</label>
     <input id="url" name="url" type="url" placeholder="https://example.com/news">
-    <span class="hint">Optional when you merge existing feeds below.</span>
+    <span class="hint">An existing feed is read as one. Optional when you merge existing feeds below.</span>
    </div>
    <div class="row">
     <div class="field">
@@ -1184,7 +1290,65 @@ feed URL, so a feed is a URL you can edit, share, and keep.</p>
 </body>
 </html>`
 
-func indexPage() string { return indexHTMLHead + brandHeader(navManage) + indexHTMLBody }
+// indexPage returns the builder page HTML, with form fields pre-filled from
+// the given query values (e.g., when clicking "Edit" from a preview).
+func indexPage(q url.Values) string {
+	return indexHTMLHead + brandHeader(navManage) + fillFormValues(indexHTMLBody, q)
+}
+
+// fillFormValues injects key values from the query into the form HTML.
+func fillFormValues(body string, q url.Values) string {
+	// url field
+	body = strings.Replace(body,
+		`<input id="url" name="url" type="url" placeholder="https://example.com/news">`,
+		fmt.Sprintf(`<input id="url" name="url" type="url" placeholder="https://example.com/news" value="%s">`, html.EscapeString(q.Get("url"))), 1)
+
+	// max field
+	body = strings.Replace(body,
+		`<input id="max" name="max" type="number" min="1" max="200" placeholder="50">`,
+		fmt.Sprintf(`<input id="max" name="max" type="number" min="1" max="200" placeholder="50" value="%s">`, html.EscapeString(q.Get("max"))), 1)
+
+	// format select
+	if q.Get("format") == "atom" {
+		body = strings.Replace(body,
+			`<option value="atom">Atom 1.0</option>`,
+			`<option value="atom" selected>Atom 1.0</option>`, 1)
+	} else if q.Get("format") == "json" {
+		body = strings.Replace(body,
+			`<option value="json">JSON Feed 1.1</option>`,
+			`<option value="json" selected>JSON Feed 1.1</option>`, 1)
+	}
+	if q.Get("format") == "" || q.Get("format") == "rss" {
+		body = strings.Replace(body,
+			`<option value="">RSS 2.0 (default)</option>`,
+			`<option value="" selected>RSS 2.0 (default)</option>`, 1)
+	}
+
+	// fulltext select
+	if q.Get("fulltext") == "1" {
+		body = strings.Replace(body,
+			`<option value="1">Yes (fetch article bodies)</option>`,
+			`<option value="1" selected>Yes (fetch article bodies)</option>`, 1)
+	} else {
+		body = strings.Replace(body,
+			`<option value="">No (use the listing summary)</option>`,
+			`<option value="" selected>No (use the listing summary)</option>`, 1)
+	}
+
+	// title field
+	body = strings.Replace(body,
+		`<input id="title" name="title" type="text" placeholder="My news feed">`,
+		fmt.Sprintf(`<input id="title" name="title" type="text" placeholder="My news feed" value="%s">`, html.EscapeString(q.Get("title"))), 1)
+
+	// fulltext_max field
+	if q.Get("fulltext_max") != "" {
+		body = strings.Replace(body,
+			`<input id="fulltext_max" name="fulltext_max" type="number" min="1" max="200" placeholder="20">`,
+			fmt.Sprintf(`<input id="fulltext_max" name="fulltext_max" type="number" min="1" max="200" placeholder="20" value="%s">`, html.EscapeString(q.Get("fulltext_max"))), 1)
+	}
+
+	return body
+}
 
 func checkPage(spec feedurl.Spec) string {
 	var b strings.Builder
@@ -1325,6 +1489,17 @@ func feedURLForCheck(spec feedurl.Spec) string {
 	return "?" + q
 }
 
+// editURLFor builds the home page URL with the current spec's parameters,
+// so clicking "Edit" from a preview pre-fills the builder form.
+func editURLFor(spec feedurl.Spec) string {
+	values := spec.Query()
+	q := values.Encode()
+	if q == "" {
+		return ""
+	}
+	return "/?" + q
+}
+
 // previewPage renders the items a feed currently contains. It is the answer to
 // "did I get this right?" and exists so that a user can judge a feed before
 // committing a reader to it. Everything shown comes from the same build the
@@ -1416,7 +1591,13 @@ func previewPage(spec feedurl.Spec, resp feedResponse, feedURL string) string {
 	b.WriteString(`<a class="btn primary" href="` + html.EscapeString(feedURL) + `">Open feed</a>`)
 	b.WriteString(`<a class="btn" href="/check`)
 	b.WriteString(html.EscapeString(feedURLForCheck(spec)))
-	b.WriteString(`">Resolved parameters</a><a class="btn" href="/">Edit</a></div>`)
+	b.WriteString(`">Resolved parameters</a>`)
+	if editHref := editURLFor(spec); editHref != "" {
+		b.WriteString(`<a class="btn" href="` + html.EscapeString(editHref) + `">Edit</a>`)
+	} else {
+		b.WriteString(`<a class="btn" href="/">Edit</a>`)
+	}
+	b.WriteString(`</div>`)
 	b.WriteString(`</main></body></html>`)
 	return b.String()
 }

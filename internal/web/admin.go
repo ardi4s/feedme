@@ -40,6 +40,12 @@ type BuiltFeed struct {
 	// LastError explains why the most recent build failed, empty when it
 	// succeeded.
 	LastError string
+
+	// Health fields (computed from build history)
+	FailureStreak int
+	TotalRecent   int
+	LastSuccess   time.Time
+	AvgBuildMs    int
 }
 
 // State is the one word the page shows for a feed: what it is right now.
@@ -54,6 +60,96 @@ func (f BuiltFeed) State() (label, class string) {
 	default:
 		return "not cached", "muted"
 	}
+}
+
+// CombinedStatus returns a combined status label, CSS class, and tooltip
+// that merges cache state (State) with build health (HealthState).
+func (f BuiltFeed) CombinedStatus() (label, class, tooltip string) {
+	// Priority: build failure > cache state > health > cache fresh
+	switch {
+	case f.LastError != "":
+		// Build failed - highest priority
+		return "failed", "err", f.LastError
+	case f.FailureStreak > 0:
+		// Consecutive failures
+		return fmt.Sprintf("failing (%d/%d)", f.FailureStreak, f.TotalRecent), "err",
+			fmt.Sprintf("%d consecutive failures; last success %s; avg build %s; %d/%d recent ok",
+				f.FailureStreak,
+				f.LastSuccessTime(),
+				f.AvgBuildTime(),
+				f.TotalRecent-f.FailureStreak, f.TotalRecent)
+	case f.TotalRecent == 0:
+		// No build history - fall back to cache state
+		label, class := f.State()
+		return label, class, "No build history; cache: " + label
+	case f.LastSuccess.IsZero():
+		// Never succeeded (but has history)
+		return "never ok", "warn",
+			fmt.Sprintf("Never succeeded; %s", f.HealthStateTooltip())
+	case f.Stale:
+		// Cache expired
+		return "stale", "warn", "Cache expired, will rebuild on next request"
+	case f.Cached:
+		// Fresh cache with health info
+		return "fresh", "ok", f.HealthStateTooltip()
+	default:
+		return "unknown", "muted", "No build history"
+	}
+}
+
+// HealthState returns a health label and CSS class for the feed.
+
+// HealthState returns a health label and CSS class for the feed.
+func (f BuiltFeed) HealthState() (label, class string) {
+	if f.TotalRecent == 0 {
+		return "unknown", "muted"
+	}
+	if f.FailureStreak > 0 {
+		return fmt.Sprintf("failing (%d/%d)", f.FailureStreak, f.TotalRecent), "err"
+	}
+	if f.LastSuccess.IsZero() {
+		return "never ok", "warn"
+	}
+	return fmt.Sprintf("healthy (%d/%d)", f.TotalRecent-f.FailureStreak, f.TotalRecent), "ok"
+}
+
+// AvgBuildTime returns a human-readable average build time.
+func (f BuiltFeed) AvgBuildTime() string {
+	if f.AvgBuildMs <= 0 {
+		return "—"
+	}
+	if f.AvgBuildMs < 1000 {
+		return fmt.Sprintf("%dms", f.AvgBuildMs)
+	}
+	return fmt.Sprintf("%.1fs", float64(f.AvgBuildMs)/1000)
+}
+
+// LastSuccessTime returns a human-readable last success time.
+func (f BuiltFeed) LastSuccessTime() string {
+	if f.LastSuccess.IsZero() {
+		return "never"
+	}
+	return agoTime(f.LastSuccess, time.Now())
+}
+
+// HealthStateTooltip returns a detailed tooltip for the health badge.
+func (f BuiltFeed) HealthStateTooltip() string {
+	if f.TotalRecent == 0 {
+		return "No build history available"
+	}
+	var parts []string
+	if f.FailureStreak > 0 {
+		parts = append(parts, fmt.Sprintf("%d consecutive failures", f.FailureStreak))
+	} else if f.LastSuccess.IsZero() {
+		parts = append(parts, "Never succeeded")
+	} else {
+		parts = append(parts, fmt.Sprintf("Last success %s", agoTime(f.LastSuccess, time.Now())))
+	}
+	if f.AvgBuildMs > 0 {
+		parts = append(parts, fmt.Sprintf("avg build %s", f.AvgBuildTime()))
+	}
+	parts = append(parts, fmt.Sprintf("%d/%d recent builds ok", f.TotalRecent-f.FailureStreak, f.TotalRecent))
+	return strings.Join(parts, "; ")
 }
 
 // FeedAdmin persists what the management page shows and changes.
@@ -219,6 +315,7 @@ const (
 	sortItems  = "items"
 	sortBuilt  = "built"
 	sortState  = "state"
+	sortStatus = "status"
 )
 
 func defaultSortDir(key string) string {
@@ -232,7 +329,7 @@ func parseSort(r *http.Request) sortSpec {
 	q := r.URL.Query()
 	key := q.Get("sort")
 	switch key {
-	case sortSource, sortFeed, sortItems, sortBuilt, sortState:
+	case sortSource, sortFeed, sortItems, sortBuilt, sortState, sortStatus:
 	default:
 		key = sortSource
 	}
@@ -445,8 +542,13 @@ func (s *Server) renderFeeds(w http.ResponseWriter, r *http.Request) {
 }
 
 const feedsColgroup = `<colgroup>` +
-	`<col class="check"><col class="source"><col class="feed">` +
-	`<col class="items"><col class="built"><col class="state"><col class="action">` +
+	`<col class="check" style="width: 40px;">` +
+	`<col class="source" style="width: 220px;">` +
+	`<col class="feed" style="width: 420px;">` +
+	`<col class="items" style="width: 60px;">` +
+	`<col class="built" style="width: 120px;">` +
+	`<col class="status" style="width: 180px;">` +
+	`<col class="action" style="width: 160px;">` +
 	`</colgroup>`
 
 // feedsToolbar carries the bulk form. It sits outside the table so the row
@@ -462,6 +564,11 @@ const feedsToolbar = `<div class="toolbar">` +
 	`</select>` +
 	`<button id="bulk-apply" class="btn" type="submit">Apply</button>` +
 	`</form>` +
+	`<div class="export-menu">` +
+	`<a class="btn" href="/feeds/export?format=opml" title="Download every listed feed as OPML 2.0, for import into a reader">Export OPML</a>` +
+	`<a class="btn" href="/feeds/export?format=csv" title="Download every listed feed as CSV for spreadsheet import">Export CSV</a>` +
+	`<a class="btn" href="/feeds/export?format=json" title="Download every listed feed as JSON for programmatic use">Export JSON</a>` +
+	`</div>` +
 	`</div>`
 
 func writeFeedsHead(b *strings.Builder, spec sortSpec) {
@@ -471,7 +578,7 @@ func writeFeedsHead(b *strings.Builder, spec sortSpec) {
 	writeSortHeader(b, sortFeed, "Feed", "", spec)
 	writeSortHeader(b, sortItems, "Item", "items", spec)
 	writeSortHeader(b, sortBuilt, "Built", "built", spec)
-	writeSortHeader(b, sortState, "State", "state", spec)
+	writeSortHeader(b, sortStatus, "Status", "status", spec)
 	b.WriteString(`<th class="action">Action</th>`)
 	b.WriteString(`</tr></thead>`)
 }
@@ -531,9 +638,9 @@ func writeFeedRow(b *strings.Builder, group string, f BuiltFeed, now time.Time) 
 	fmt.Fprintf(b, `<td class="items">%d</td>`, f.ItemCount)
 	fmt.Fprintf(b, `<td class="built"><span title="%s">%s</span></td>`,
 		html.EscapeString(shortTime(f.FetchedAt)), html.EscapeString(agoTime(f.FetchedAt, now)))
-	label, class := f.State()
-	fmt.Fprintf(b, `<td class="state"><span class="badge %s">%s</span></td>`,
-		class, html.EscapeString(label))
+	label, class, tooltip := f.CombinedStatus()
+	fmt.Fprintf(b, `<td class="status"><span class="badge %s" title="%s">%s</span></td>`,
+		class, html.EscapeString(tooltip), html.EscapeString(label))
 	writeRowActions(b, f.Key)
 	b.WriteString(`</tr>`)
 }
@@ -569,16 +676,35 @@ func writeFeedCell(b *strings.Builder, f BuiltFeed) {
 	b.WriteString(`</td>`)
 }
 
-// writeRowActions puts the two per-feed actions in their own form. The form is
+// writeRowActions puts the per-feed actions in their own form. The form is
 // inline in the cell rather than one form around the table, because the bulk
-// checkboxes already belong to the toolbar's form and forms cannot nest.
+// checkboxes already belong to the toolbar's form and forms cannot nest. The
+// preview link sits outside the form: it is a read, and it opens in its own tab
+// like the source and feed links do.
 func writeRowActions(b *strings.Builder, key string) {
 	b.WriteString(`<td class="action"><div class="actions">`)
+	if preview, ok := previewURLFor(key); ok {
+		fmt.Fprintf(b, `<a class="btn" href="%s" title="Build the feed again and show its items" `+
+			`target="_blank" rel="noopener">Preview</a>`, html.EscapeString(preview))
+	}
 	b.WriteString(`<form method="post" action="/feeds">`)
 	fmt.Fprintf(b, `<input type="hidden" name="key" value="%s">`, html.EscapeString(key))
 	b.WriteString(`<button class="btn" type="submit" name="action" value="refresh">Refresh</button>`)
 	b.WriteString(`<button class="btn danger" type="submit" name="action" value="forget">Forget</button>`)
 	b.WriteString(`</form></div></td>`)
+}
+
+// previewURLFor swaps a feed URL's path for the preview page and keeps the
+// query verbatim, because the query is the feed's configuration: a preview
+// built from it shows exactly what the feed produces. A key that is not a URL
+// yields no link rather than a broken one.
+func previewURLFor(key string) (string, bool) {
+	u, err := url.Parse(key)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", false
+	}
+	u.Path = "/preview"
+	return u.String(), true
 }
 
 // feedsScript is the whole page's JavaScript: select-all, the group checkbox

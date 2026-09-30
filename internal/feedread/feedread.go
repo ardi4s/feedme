@@ -177,6 +177,7 @@ func rssItemToItem(it rssItem, base string) listpage.Item {
 		Date:    parseDate(firstNonEmpty(it.PubDate, it.DCDate)),
 		Summary: summary,
 		Image:   rssImage(it),
+		GUID:    strings.TrimSpace(it.GUID),
 	}
 }
 
@@ -243,6 +244,7 @@ func parseAtom(b []byte, base string) (*Document, error) {
 			Date:    parseDate(firstNonEmpty(e.Published, e.Updated)),
 			Summary: summary,
 			Image:   atomImage(e, base),
+			GUID:    strings.TrimSpace(e.ID),
 		})
 	}
 	return &Document{
@@ -339,6 +341,7 @@ func parseJSON(b []byte, base string) (*Document, error) {
 			Date:    parseDate(firstNonEmpty(it.DatePublished, it.DateModified)),
 			Summary: domx.NormSpace(summary),
 			Image:   strings.TrimSpace(it.Image),
+			GUID:    strings.TrimSpace(it.ID),
 		})
 	}
 	return &Document{
