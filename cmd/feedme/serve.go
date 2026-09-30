@@ -178,6 +178,7 @@ func runServe(args []string) error {
 		Recorder:    storeRecorder{st: st},
 		Admin:       storeAdmin{st: st},
 		ManageToken: manageToken,
+		Metrics:     web.NewMetrics(),
 	})
 
 	srv := &http.Server{

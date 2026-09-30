@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"feedme/internal/fetch"
 )
@@ -19,13 +20,14 @@ type Client interface {
 
 // Resolver opens Google News links.
 //
-// One instance is shared by every worker building a feed. It holds no state
-// between calls on purpose: the signature is bound to one article and expires,
-// so a cached answer would be a cached answer to a question that has since
-// changed.
+// One instance is shared by every worker building a feed. It holds a cache
+// for resolved article URLs so that the same article ID is not resolved
+// multiple times during a single feed build.
 type Resolver struct {
-	client Client
-	logger *slog.Logger
+	client   Client
+	logger   *slog.Logger
+	cacheMu  sync.RWMutex
+	urlCache map[string]string
 }
 
 // NewResolver returns a Resolver that asks client for the two requests, and
@@ -35,7 +37,11 @@ func NewResolver(client Client, logger *slog.Logger) *Resolver {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	return &Resolver{client: client, logger: logger}
+	return &Resolver{
+		client:   client,
+		logger:   logger,
+		urlCache: make(map[string]string),
+	}
 }
 
 // Resolve returns the publisher URL behind a Google News link, whether the link
@@ -55,11 +61,27 @@ func (r *Resolver) Resolve(ctx context.Context, rawURL string) (string, bool, er
 	if target, ok := DecodeLegacy(id); ok {
 		return target, true, nil
 	}
+
+	// Check cache
+	r.cacheMu.RLock()
+	if cached, ok := r.urlCache[id]; ok {
+		r.cacheMu.RUnlock()
+		r.logger.Debug("gnews: cache hit", "id", id)
+		return cached, true, nil
+	}
+	r.cacheMu.RUnlock()
+
 	target, err := r.resolveSigned(ctx, id, rawURL)
 	if err != nil {
 		r.logger.Debug("gnews: could not open a Google News link", "err", err)
 		return "", true, err
 	}
+
+	// Store in cache
+	r.cacheMu.Lock()
+	r.urlCache[id] = target
+	r.cacheMu.Unlock()
+
 	return target, true, nil
 }
 
@@ -88,3 +110,10 @@ func (r *Resolver) resolveSigned(ctx context.Context, id, itemLink string) (stri
 // contentTypeForm is what the endpoint is written against; a plain
 // application/x-www-form-urlencoded is answered with an error page instead.
 const contentTypeForm = "application/x-www-form-urlencoded;charset=UTF-8"
+
+// ClearCache clears the URL cache. Useful for testing.
+func (r *Resolver) ClearCache() {
+	r.cacheMu.Lock()
+	r.urlCache = make(map[string]string)
+	r.cacheMu.Unlock()
+}

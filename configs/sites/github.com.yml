@@ -1,0 +1,4 @@
+# GitHub release feeds are at /<owner>/<repo>/releases.atom. The feed items
+# link directly to the release page on github.com, which is the publisher.
+# allow_cross_host is not needed because the links stay on the same host.
+# No special config needed, but this file documents the expected behavior.

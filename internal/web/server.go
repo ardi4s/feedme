@@ -50,6 +50,8 @@ type Options struct {
 	// leaves the page open, which is what a single-user instance on localhost
 	// wants.
 	ManageToken string
+	// Metrics enables Prometheus metrics at /metrics. Nil disables it.
+	Metrics *Metrics
 }
 
 // CachedFeed is a rendered feed kept between requests.
@@ -112,6 +114,7 @@ type Server struct {
 	recorder    BuildRecorder
 	admin       FeedAdmin
 	manageToken string
+	metrics     *Metrics
 }
 
 // New builds a Server.
@@ -128,6 +131,7 @@ func New(o Options) *Server {
 		recorder:    o.Recorder,
 		admin:       o.Admin,
 		manageToken: o.ManageToken,
+		metrics:     o.Metrics,
 	}
 	if s.log == nil {
 		s.log = slog.New(discardHandler{})
@@ -180,6 +184,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeAsset(w, r, faviconPNG, "image/png")
 	case "/favicon.ico":
 		writeAsset(w, r, faviconICO, "image/x-icon")
+	case "/metrics":
+		if s.metrics != nil {
+			s.metrics.MetricsHandler().ServeHTTP(w, r)
+		} else {
+			http.Error(w, "not found", http.StatusNotFound)
+		}
 	case "/":
 		s.handleIndex(w, r)
 	default:
@@ -242,11 +252,31 @@ func (s *Server) handleExtract(w http.ResponseWriter, r *http.Request) {
 	spec.Feed.SelfLink = key
 	spec.Feed.SelfType = contentTypeOf(spec.Format)
 
+	start := time.Now()
 	resp, fromFeedCache, err := s.buildFeed(r.Context(), key, spec, truthyParam(r, "refresh"), true)
+	buildDuration := time.Since(start)
+
+	if s.metrics != nil {
+		s.metrics.RecordBuildDuration(string(spec.Format), buildDuration)
+	}
+
 	if err != nil {
+		if s.metrics != nil {
+			s.metrics.RecordFeedFailed(errorTypeFromError(err))
+		}
 		s.writeRunError(w, r, err)
 		return
 	}
+
+	if s.metrics != nil {
+		s.metrics.RecordFeedBuilt(string(spec.Format), detectionString(resp.result))
+		s.metrics.RecordItemsExtracted(hostFromURL(spec.URL), len(resp.items))
+		if spec.FullText {
+			s.metrics.RecordFulltextFetched(hostFromURL(spec.URL), resp.result.FullTextFetched)
+			s.metrics.RecordFulltextFailed(hostFromURL(spec.URL), resp.result.FullTextFailed)
+		}
+	}
+
 	s.writeFeed(w, r, resp, fromFeedCache)
 }
 

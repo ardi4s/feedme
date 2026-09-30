@@ -31,6 +31,11 @@ type Item struct {
 	Date    time.Time
 	Image   string
 	Summary string
+	// GUID is a globally unique identifier for the item, from the feed's
+	// <guid>, <id>, or equivalent field. It is used for deduplication
+	// when merging feeds, because links may differ by tracking params while
+	// the GUID remains stable.
+	GUID string
 }
 
 // ErrNoItems is returned when nothing usable was found. It is an ordinary

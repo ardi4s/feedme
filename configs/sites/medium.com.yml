@@ -1,0 +1,4 @@
+# Medium serves its feeds from medium.com/feed/... which robots.txt allows,
+# but the article pages often require JavaScript rendering. The feed itself
+# is readable without JS, but full-text extraction benefits from render_js.
+render_js: true
