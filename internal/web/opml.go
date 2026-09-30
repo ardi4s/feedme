@@ -65,7 +65,7 @@ func (s *Server) handleFeedsExport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		s.fail(w, r, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
