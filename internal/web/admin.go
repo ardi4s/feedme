@@ -62,6 +62,43 @@ func (f BuiltFeed) State() (label, class string) {
 	}
 }
 
+// CombinedStatus returns a combined status label, CSS class, and tooltip
+// that merges cache state (State) with build health (HealthState).
+func (f BuiltFeed) CombinedStatus() (label, class, tooltip string) {
+	// Priority: build failure > cache state > health > cache fresh
+	switch {
+	case f.LastError != "":
+		// Build failed - highest priority
+		return "failed", "err", f.LastError
+	case f.FailureStreak > 0:
+		// Consecutive failures
+		return fmt.Sprintf("failing (%d/%d)", f.FailureStreak, f.TotalRecent), "err",
+			fmt.Sprintf("%d consecutive failures; last success %s; avg build %s; %d/%d recent ok",
+				f.FailureStreak,
+				f.LastSuccessTime(),
+				f.AvgBuildTime(),
+				f.TotalRecent-f.FailureStreak, f.TotalRecent)
+	case f.TotalRecent == 0:
+		// No build history - fall back to cache state
+		label, class := f.State()
+		return label, class, "No build history; cache: " + label
+	case f.LastSuccess.IsZero():
+		// Never succeeded (but has history)
+		return "never ok", "warn",
+			fmt.Sprintf("Never succeeded; %s", f.HealthStateTooltip())
+	case f.Stale:
+		// Cache expired
+		return "stale", "warn", "Cache expired, will rebuild on next request"
+	case f.Cached:
+		// Fresh cache with health info
+		return "fresh", "ok", f.HealthStateTooltip()
+	default:
+		return "unknown", "muted", "No build history"
+	}
+}
+
+// HealthState returns a health label and CSS class for the feed.
+
 // HealthState returns a health label and CSS class for the feed.
 func (f BuiltFeed) HealthState() (label, class string) {
 	if f.TotalRecent == 0 {
@@ -544,8 +581,7 @@ func (s *Server) renderFeeds(w http.ResponseWriter, r *http.Request) {
 
 const feedsColgroup = `<colgroup>` +
 	`<col class="check"><col class="source"><col class="feed">` +
-	`<col class="items"><col class="built"><col class="state">` +
-	`<col class="health"><col class="streak"><col class="avgbuild"><col class="lastok">` +
+	`<col class="items"><col class="built"><col class="status">` +
 	`<col class="action">` +
 	`</colgroup>`
 
@@ -576,11 +612,7 @@ func writeFeedsHead(b *strings.Builder, spec sortSpec) {
 	writeSortHeader(b, sortFeed, "Feed", "", spec)
 	writeSortHeader(b, sortItems, "Item", "items", spec)
 	writeSortHeader(b, sortBuilt, "Built", "built", spec)
-	writeSortHeader(b, sortState, "State", "state", spec)
-	writeSortHeader(b, sortHealth, "Health", "health", spec)
-	writeSortHeader(b, sortStreak, "Streak", "streak", spec)
-	writeSortHeader(b, sortAvgBuild, "Avg build", "avgbuild", spec)
-	writeSortHeader(b, sortLastOK, "Last OK", "lastok", spec)
+	b.WriteString(`<th class="status">Status</th>`)
 	b.WriteString(`<th class="action">Action</th>`)
 	b.WriteString(`</tr></thead>`)
 }
@@ -640,16 +672,9 @@ func writeFeedRow(b *strings.Builder, group string, f BuiltFeed, now time.Time) 
 	fmt.Fprintf(b, `<td class="items">%d</td>`, f.ItemCount)
 	fmt.Fprintf(b, `<td class="built"><span title="%s">%s</span></td>`,
 		html.EscapeString(shortTime(f.FetchedAt)), html.EscapeString(agoTime(f.FetchedAt, now)))
-	label, class := f.State()
-	fmt.Fprintf(b, `<td class="state"><span class="badge %s">%s</span></td>`,
-		class, html.EscapeString(label))
-	// Health columns
-	healthLabel, healthClass := f.HealthState()
-	fmt.Fprintf(b, `<td class="health"><span class="badge %s" title="%s">%s</span></td>`,
-		healthClass, html.EscapeString(f.HealthStateTooltip()), html.EscapeString(healthLabel))
-	fmt.Fprintf(b, `<td class="streak">%d/%d</td>`, f.FailureStreak, f.TotalRecent)
-	fmt.Fprintf(b, `<td class="avgbuild">%s</td>`, html.EscapeString(f.AvgBuildTime()))
-	fmt.Fprintf(b, `<td class="lastok">%s</td>`, html.EscapeString(f.LastSuccessTime()))
+	label, class, tooltip := f.CombinedStatus()
+	fmt.Fprintf(b, `<td class="status"><span class="badge %s" title="%s">%s</span></td>`,
+		class, html.EscapeString(tooltip), html.EscapeString(label))
 	writeRowActions(b, f.Key)
 	b.WriteString(`</tr>`)
 }
