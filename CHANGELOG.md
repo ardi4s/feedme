@@ -2,7 +2,7 @@
 
 Newest first. Versions are `MAJOR.MINOR.PATCH`.
 
-## 0.3.0 — unreleased
+## 0.3.0 — 2026-09-30
 
 - A feed address in the `url` field is read as a feed. Pasting one there used to
   fail with `no items found`, because there is no HTML in an RSS document for the
