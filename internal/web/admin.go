@@ -580,9 +580,13 @@ func (s *Server) renderFeeds(w http.ResponseWriter, r *http.Request) {
 }
 
 const feedsColgroup = `<colgroup>` +
-	`<col class="check"><col class="source"><col class="feed">` +
-	`<col class="items"><col class="built"><col class="status">` +
-	`<col class="action">` +
+	`<col class="check" style="width: 40px;">` +
+	`<col class="source" style="width: 220px;">` +
+	`<col class="feed" style="width: 420px;">` +
+	`<col class="items" style="width: 60px;">` +
+	`<col class="built" style="width: 120px;">` +
+	`<col class="status" style="width: 180px;">` +
+	`<col class="action" style="width: 160px;">` +
 	`</colgroup>`
 
 // feedsToolbar carries the bulk form. It sits outside the table so the row
