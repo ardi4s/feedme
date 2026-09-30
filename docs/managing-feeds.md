@@ -31,10 +31,15 @@ Lists every feed the server has built, grouped by the site it came from:
 - **Built** — when that build ran, as a distance (`3h ago`); the exact time is
   in the tooltip.
 
-- **State** — `fresh` (a stored body is current), `stale` (a stored body has
-  expired, and the next request rebuilds it), `not cached` (only the build
-  history is left), or `failed` (the newest build produced nothing, and its
-  error is shown).
+- **Status** — a merged view of cache state and build health:
+  - `failed` — build failed (error shown in tooltip)
+  - `failing (3/10)` — 3 consecutive failures of 10 recent builds; tooltip shows streak, last success, avg build time, success ratio
+  - `never ok` — feed has history but never succeeded
+  - `stale` — cache expired, will rebuild on next request
+  - `fresh` — cache valid; tooltip shows last success, avg build time, success ratio
+  - `unknown` — no build history, cache state unknown
+
+  Hover the badge for detailed diagnostics (failure streak, last success, avg build time, success ratio).
 
 - **Action** — **Refresh now** rebuilds through the same path a reader takes,
   and **Forget** removes the feed from the list and drops its build history.
@@ -48,8 +53,8 @@ file in one step and nothing about feed URLs changes. The download is an
 attachment named for the day, and it lists the same feeds the page shows,
 because both are read from the build history.
 
-The header sorts the list (`?sort=source`, `feed`, `items`, `built`, or
-`state`, with `?dir=asc`/`desc`) and offers a select-all checkbox. Checking rows
+The header sorts the list (`?sort=source`, `feed`, `items`, `built`, `status`,
+with `?dir=asc`/`desc`) and offers a select-all checkbox. Checking rows
 and choosing **Refresh** or **Delete** in the toolbar applies the action to all
 of them in one request; the toolbar sticks to the top of the window while the
 list scrolls, and its Apply button only enables once something is checked.
