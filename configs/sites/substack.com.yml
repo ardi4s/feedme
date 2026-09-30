@@ -1,4 +1,0 @@
-# Substack newsletters serve full-text RSS at /feed. The feed already contains
-# the article body, so fulltext=1 is not needed. The feed link is the publisher
-# URL, so no click-through handling is required.
-# No special config needed, but this file documents the expected behavior.
