@@ -39,6 +39,10 @@ window is advertised to readers through `Cache-Control`. An `ETag` and a
 `Last-Modified` time let a reader revalidate with a `304` that costs nothing;
 `If-None-Match` is the stronger validator, so it wins when a client sends both.
 
+For GET and HEAD, `If-None-Match` accepts weak tags, tag lists and `*`.
+Repeated fields are read as one list. Commas inside quoted tags stay part of the tag.
+An empty or malformed field does not match and still takes precedence over `If-Modified-Since`.
+
 ## Refresh and Fresh
 
 - `refresh=1` bypasses the feed cache and rebuilds from the source, for this
