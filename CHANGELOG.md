@@ -2,6 +2,11 @@
 
 Newest first. Versions are `MAJOR.MINOR.PATCH`.
 
+## Unreleased
+
+- Feed requests now return `304` for matching weak entity tags, tag lists and `*`.
+  Repeated `If-None-Match` fields are combined. Empty fields still take precedence over `If-Modified-Since`.
+
 ## 0.3.0 — 2026-09-30
 
 - A feed address in the `url` field is read as a feed. Pasting one there used to

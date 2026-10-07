@@ -424,6 +424,7 @@ published text, so raise it before touching them.
 - **Auto-discovery**: `url=` now detects `<link rel="alternate" type="application/rss+xml">` in HTML and auto-fetches the feed.
 - **gzip/brotli compression** on `/extract` (Accept-Encoding: gzip/br).
 - **Conditional requests**: If-None-Match (ETag) and If-Modified-Since return 304.
+  If-None-Match accepts weak tags, lists, repeated fields and `*` on GET and HEAD.
 - **Export formats**: `/feeds/export?format=opml|csv|json` (OPML/CSV/JSON) with HEAD support.
 - **Feed column widened** to 420px in management table.
 - **OPML import** not yet done.

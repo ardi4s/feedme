@@ -499,8 +499,8 @@ func (s *Server) writeFeed(w http.ResponseWriter, r *http.Request, resp feedResp
 	if !lastModified.IsZero() {
 		w.Header().Set("Last-Modified", lastModified.Format(http.TimeFormat))
 	}
-	if match := r.Header.Get("If-None-Match"); match != "" {
-		if match == resp.etag {
+	if values := r.Header.Values("If-None-Match"); len(values) > 0 {
+		if matchesIfNoneMatch(strings.Join(values, ","), resp.etag) {
 			s.writeNotModified(w, resp, cacheControl)
 			return
 		}
@@ -561,6 +561,50 @@ func (s *Server) writeFeed(w http.ResponseWriter, r *http.Request, resp feedResp
 		return
 	}
 	w.Write(resp.body)
+}
+
+// If-None-Match uses weak comparison. Commas inside an opaque tag are data,
+// so splitting the header on every comma would misread valid tags.
+func matchesIfNoneMatch(value, etag string) bool {
+	value = strings.Trim(value, " \t")
+	if value == "*" {
+		return true
+	}
+	etag = strings.TrimPrefix(etag, "W/")
+	matched := false
+	for value != "" {
+		value = strings.Trim(value, " \t")
+		if value == "" {
+			break
+		}
+		if value[0] == ',' {
+			value = value[1:]
+			continue
+		}
+		value = strings.TrimPrefix(value, "W/")
+		if len(value) == 0 || value[0] != '"' {
+			return false
+		}
+		end := 1
+		for end < len(value) && value[end] != '"' {
+			if value[end] < 0x21 || value[end] == 0x7f {
+				return false
+			}
+			end++
+		}
+		if end == len(value) {
+			return false
+		}
+		matched = matched || value[:end+1] == etag
+		value = strings.Trim(value[end+1:], " \t")
+		if value != "" {
+			if value[0] != ',' {
+				return false
+			}
+			value = value[1:]
+		}
+	}
+	return matched
 }
 
 // writeNotModified answers a conditional request. The validators are set again

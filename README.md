@@ -33,6 +33,9 @@ carries the binary as a tarball for linux/amd64 and linux/arm64. The
 [container image](https://github.com/ardi4s/feedme/pkgs/container/feedme) is the
 other way in.
 
+Readers can revalidate a feed with `If-None-Match` or `If-Modified-Since`.
+Matching entity tags, including weak tags and lists, return `304` without a body.
+
 ### Docker
 
 ```sh
